@@ -18,16 +18,25 @@ with open('pyinaturalistkey.pkd', 'rb') as f:
     API_KEY = dill.load(f)
 
 
-def get_mine(uname:str, lookback_in_days: int, api_key: str=API_KEY) -> None:
+def get_mine(uname:str, lookback_to: dt.datetime=None, lookback_in_days: int=None, api_key: str=API_KEY) -> None:
     """
     Loads my observations by observation time (by iconic taxon?) in format appropriate for photo labels
     """
+    assert not (lookback_to and lookback_in_days), "only one of lookback_to or lookback_in_days should be provided"
+    
+    if not lookback_to and not lookback_in_days:
+        print('assuming lookback_in_days=1')
+        lookback_in_days = 1
+
     # Define the base URL for the iNaturalist API
     base_url = "https://api.inaturalist.org/v1/observations"
 
     # Define the current date
     now = dt.datetime.now()
-    start_date = now - dt.timedelta(days=lookback_in_days)
+    if lookback_to:
+        start_date = lookback_to
+    else:
+        start_date = now - dt.timedelta(days=lookback_in_days)
 
     response = inat.get_observations(user_id=[uname], d1=start_date, page='all')
 
@@ -53,7 +62,8 @@ def get_mine(uname:str, lookback_in_days: int, api_key: str=API_KEY) -> None:
 
 
 def coming_soon(kind:str,
-                loc:tuple[float,float,float]=(37.6669, -77.8883, 25),
+                places:list[int]=None,
+                loc:tuple[float,float,float]=None,
                 norm:str=None,
                 limit:int=10,
                 ) -> None:
@@ -73,6 +83,12 @@ def coming_soon(kind:str,
     add support for caterpillars/butterflies (and similar for benthic macroinverts?)
     split animals by clade and/or generalize interface?
     """
+    assert not (places and loc), "only one of places and loc should be provided"
+    
+    if not places and not loc:
+        print('no place or location specified, assuming loc=(37.6669, -77.8883, 25)')
+        loc = (37.6669, -77.8883, 25)
+
     assert norm==None, "not implemented yet"
 
     if kind == 'animals':
@@ -88,7 +104,9 @@ def coming_soon(kind:str,
     else:
         raise ValueError(f"kind '{kind}' not implemented")
 
-    if isinstance(loc,tuple) & (len(loc)==3):
+    if places:
+        place = {'place_id':places}
+    elif isinstance(loc,tuple) & (len(loc)==3):
         place = {'lat':loc[0], 
                  'lng':loc[1], 
                  'radius':loc[2]}
