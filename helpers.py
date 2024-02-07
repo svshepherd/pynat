@@ -68,10 +68,8 @@ def coming_soon(kind:str,
                 limit:int=10,
                 ) -> None:
     """shows organism which have been observed in this season near here.
-    
-    roadmap:
-    try to narrow time frame to consistently 21-day period?
-    normalizations for sort order:
+
+    species are listed in order of frequency, normalized by:
         count of all observations at time/place (by taxa / overall)
         count of all observations at time/place by taxa vs (10x loc radius, all-time)?
         count of all observations in time (10x loc radius?) and at place (longer window?) separately
@@ -79,6 +77,9 @@ def coming_soon(kind:str,
         (similar but by phenology?)
         (separate totals for 'research grade' and 'informal' counts)
 
+    
+    roadmap:
+    try to narrow time frame to consistently 21-day period?
     photographs should match requested phenotype where possible
     add support for caterpillars/butterflies (and similar for benthic macroinverts?)
     split animals by clade and/or generalize interface?
@@ -89,12 +90,12 @@ def coming_soon(kind:str,
         print('no place or location specified, assuming loc=(37.6669, -77.8883, 25)')
         loc = (37.6669, -77.8883, 25)
 
-    assert norm==None, "not implemented yet"
+    assert norm in [None, 'time', 'place', 'overall'], "norm must be one of None, 'time', 'place', or 'overall'"
 
     if kind == 'animals':
         taxa = {'taxon_id':1}
-    # elif kind == 'plants':
-    #     taxa = {'taxon_id':?}
+    elif kind == 'plants':
+        taxa = {'taxon_name':'plants'}
     elif kind == 'flowers':
         taxa = {'term_id':12, 'term_value_id':13}
     elif kind == 'fruits':
@@ -103,6 +104,8 @@ def coming_soon(kind:str,
         taxa = {'taxon_id':47170}
     else:
         raise ValueError(f"kind '{kind}' not implemented")
+
+    time = {'month':list(set( [(dt.date.today()+dt.timedelta(days=-7)).month, (dt.date.today()+dt.timedelta(days=7)).month] ))}
 
     if places:
         place = {'place_id':places}
@@ -114,25 +117,34 @@ def coming_soon(kind:str,
         raise ValueError(f"expected loc triple of lat,long,radius")
 
     results = inat.get_observation_species_counts(
-        month=list(set( [(dt.date.today()+dt.timedelta(days=-7)).month, (dt.date.today()+dt.timedelta(days=7)).month] )),
         verifiable=True,
         #per_page=0,
         **taxa,
+        **time,
         **place,
     )
+    results = pd.json_normalize(results['results'])
 
-    # Normalize results to DataFrame
-    df_species_counts = pd.json_normalize(results['results'])
-
-    ## todo: normalize each taxa by observation rate. numbers to consider
-    # all observations in time/place
-    # all observations in time for taxa and in place for taxa
-    # all observations in time and in place separately
-    # we want to sort things higher if more likely to be seen here&now relative to other times.
-    # (ie if a species is ONLY seen in the blue ridge in may, we'd like it to be shown first!)
+    if norm:
+        results['normalizer'] = None
+        for index, row in results.iterrows():
+            taxon_id = row['taxon.id']
+            ## if phenology is specified, I'd like to get species : phenology
+            ## if phenology is not specified, I'd like to get iconic taxa?
+            if norm == 'time':
+                results.loc[index,'normalizer'] = inat.get_observations(taxon_id=taxon_id, **(taxa if 'term_value_id' in taxa.keys() else {}),
+                                                                        **place, per_page=0)['total_results']
+            if norm == 'place':
+                results.loc[index,'normalizer'] = inat.get_observations(taxon_id=taxon_id, **(taxa if 'term_value_id' in taxa.keys() else {}), 
+                                                                        **time, per_page=0)['total_results']
+            if norm == 'overall':
+                results.loc[index,'normalizer'] = inat.get_observations(taxon_id=taxon_id, **(taxa if 'term_value_id' in taxa.keys() else {}),
+                                                                        per_page=0)['total_results']
+        results['sorter'] = results['count']/results['normalizer']
+        results.sort_values('sorter', ascending=False, inplace=True)
 
     # Display species names and their main images
-    for index, row in df_species_counts.head(limit).iterrows():
+    for index, row in results.head(limit).iterrows():
         taxon_name = row['taxon.name']
         common_name = row.get('taxon.preferred_common_name', 'N/A')
         image_url = row['taxon.default_photo.medium_url']
@@ -150,4 +162,6 @@ def coming_soon(kind:str,
         except requests.exceptions.RequestException as e:
             print(f"Failed to load image: {e}")
         ### It'd be nice to specifically select images w/ appropriate phenotype
+            
+    return results
     
