@@ -67,21 +67,13 @@ def coming_soon(kind:str,
                 norm:str=None,
                 limit:int=10,
                 ) -> None:
-    """shows organism which have been observed in this season near here.
-
-    species are listed in order of frequency, normalized by:
-        count of all observations at time/place (by taxa / overall)
-        count of all observations at time/place by taxa vs (10x loc radius, all-time)?
-        count of all observations in time (10x loc radius?) and at place (longer window?) separately
-        count of all observations in time and at place separately by taxa
-        (similar but by phenology?)
-        (separate totals for 'research grade' and 'informal' counts)
-
-    
+    """shows organism which have been observed in this season nearby, sorted by relative frequency.
+   
     roadmap:
+    turn names into links to iNaturalist
     try to narrow time frame to consistently 21-day period?
     photographs should match requested phenotype where possible
-    add support for caterpillars/butterflies (and similar for benthic macroinverts?)
+    add support for caterpillars/butterflies
     split animals by clade and/or generalize interface?
     """
     assert not (places and loc), "only one of places and loc should be provided"
@@ -105,8 +97,6 @@ def coming_soon(kind:str,
     else:
         raise ValueError(f"kind '{kind}' not implemented")
 
-    time = {'month':list(set( [(dt.date.today()+dt.timedelta(days=-7)).month, (dt.date.today()+dt.timedelta(days=7)).month] ))}
-
     if places:
         place = {'place_id':places}
     elif isinstance(loc,tuple) & (len(loc)==3):
@@ -116,9 +106,32 @@ def coming_soon(kind:str,
     else:
         raise ValueError(f"expected loc triple of lat,long,radius")
 
+    time = {'month':list(set( [(dt.date.today()+dt.timedelta(days=-7)).month, (dt.date.today()+dt.timedelta(days=14)).month] ))}
+
+    # ## fancier time resolution    
+    # time = []
+    # strt = dt.date.today()+dt.timedelta(days=-7)
+    # fnsh = dt.date.today()+dt.timedelta(days=7)
+    # dates = pd.date_range(start=strt, end=fnsh, freq='D')
+    # for month in dates.month.unique():
+    #     time.append({'month':month, 'day':list(dates[dates.month==month].day)})
+
+    # results = []
+    # for t in time:
+    #     res = inat.get_observation_species_counts(
+    #         verifiable=True,
+    #         **taxa,
+    #         **t,
+    #         **place,
+    #     )
+    #     res = pd.json_normalize(res['results'])
+    #     results.append(res)
+    # results = pd.concat(results)
+    ### ugh but need to merge these to sum counts and leave the other fields alone?
+    ### also need to hack something similar for the 'place' normalizer
+
     results = inat.get_observation_species_counts(
         verifiable=True,
-        #per_page=0,
         **taxa,
         **time,
         **place,
