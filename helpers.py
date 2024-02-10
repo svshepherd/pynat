@@ -106,53 +106,42 @@ def coming_soon(kind:str,
     else:
         raise ValueError(f"expected loc triple of lat,long,radius")
 
-    time = {'month':list(set( [(dt.date.today()+dt.timedelta(days=-7)).month, (dt.date.today()+dt.timedelta(days=14)).month] ))}
+    # time = {'month':list(set( [(dt.date.today()+dt.timedelta(days=-7)).month, (dt.date.today()+dt.timedelta(days=14)).month] ))}
+    ## fancier time resolution    
+    time = []
+    strt = dt.date.today()+dt.timedelta(days=-7)
+    fnsh = dt.date.today()+dt.timedelta(days=7)
+    dates = pd.date_range(start=strt, end=fnsh, freq='D')
+    for month in dates.month.unique():
+        time.append({'month':month, 'day':list(dates[dates.month==month].day)})
 
-    # ## fancier time resolution    
-    # time = []
-    # strt = dt.date.today()+dt.timedelta(days=-7)
-    # fnsh = dt.date.today()+dt.timedelta(days=7)
-    # dates = pd.date_range(start=strt, end=fnsh, freq='D')
-    # for month in dates.month.unique():
-    #     time.append({'month':month, 'day':list(dates[dates.month==month].day)})
+    COLS = ['taxon.id', 'taxon.name', 'taxon.preferred_common_name', 'taxon.default_photo.medium_url', 'count']
 
-    # results = []
-    # for t in time:
-    #     res = inat.get_observation_species_counts(
-    #         verifiable=True,
-    #         **taxa,
-    #         **t,
-    #         **place,
-    #     )
-    #     res = pd.json_normalize(res['results'])
-    #     results.append(res)
-    # results = pd.concat(results)
-    ### ugh but need to merge these to sum counts and leave the other fields alone?
-    ### also need to hack something similar for the 'place' normalizer
-
-    results = inat.get_observation_species_counts(
-        verifiable=True,
-        **taxa,
-        **time,
-        **place,
-    )
-    results = pd.json_normalize(results['results'])
+    results = []
+    for t in time:
+        results.append(pd.json_normalize(inat.get_observation_species_counts(verifiable=True,
+                                                                            **taxa,
+                                                                            **t,
+                                                                            **place,)['results']))
+    results = pd.concat(results)[COLS]
+    results = results.groupby(['taxon.id', 'taxon.name', 'taxon.preferred_common_name', 'taxon.default_photo.medium_url']).sum().reset_index()
 
     if norm:
-        results['normalizer'] = None
-        for index, row in results.iterrows():
-            taxon_id = row['taxon.id']
-            ## if phenology is specified, I'd like to get species : phenology
-            ## if phenology is not specified, I'd like to get iconic taxa?
-            if norm == 'time':
-                results.loc[index,'normalizer'] = inat.get_observations(taxon_id=taxon_id, **(taxa if 'term_value_id' in taxa.keys() else {}),
-                                                                        **place, per_page=0)['total_results']
-            if norm == 'place':
-                results.loc[index,'normalizer'] = inat.get_observations(taxon_id=taxon_id, **(taxa if 'term_value_id' in taxa.keys() else {}), 
-                                                                        **time, per_page=0)['total_results']
-            if norm == 'overall':
-                results.loc[index,'normalizer'] = inat.get_observations(taxon_id=taxon_id, **(taxa if 'term_value_id' in taxa.keys() else {}),
-                                                                        per_page=0)['total_results']
+        if norm == 'place':
+            normer = []
+            for t in time:
+                normer.append(pd.json_normalize(inat.get_observation_species_counts(taxon_id=results['taxon.id'].to_list(), 
+                                                                                    **(taxa if 'term_value_id' in taxa.keys() else {}),
+                                                                                    **t,
+                                                                                    verifiable=True,)['results']))
+            normer = pd.concat(normer)
+            normer = normer.groupby('taxon.id')['count'].sum()
+        else:
+            normer = pd.json_normalize(inat.get_observation_species_counts(taxon_id=results['taxon.id'].to_list(), 
+                                                                            **(taxa if 'term_value_id' in taxa.keys() else {}),
+                                                                            **(place if norm=='time' else {}), 
+                                                                            verifiable=True,)['results']).set_index('taxon.id')['count']
+        results['normalizer'] = results['taxon.id'].map(normer)
         results['sorter'] = results['count']/results['normalizer']
         results.sort_values('sorter', ascending=False, inplace=True)
 
