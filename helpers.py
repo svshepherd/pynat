@@ -124,7 +124,7 @@ def coming_soon(kind:str,
     for month in dates.month.unique():
         time.append({'month':month, 'day':list(dates[dates.month==month].day)})
 
-    COLS = ['taxon.id', 'taxon.name', 'taxon.preferred_common_name', 'taxon.default_photo.medium_url', 'count']
+    COLS = ['taxon.id', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url', 'taxon.default_photo.medium_url', 'count']
 
     results = []
     for t in time:
@@ -133,7 +133,7 @@ def coming_soon(kind:str,
                                                                             **t,
                                                                             **place,)['results']))
     results = pd.concat(results)[COLS]
-    results = results.groupby(['taxon.id', 'taxon.name', 'taxon.preferred_common_name', 'taxon.default_photo.medium_url']).sum().reset_index()
+    results = results.groupby(['taxon.id', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url', 'taxon.default_photo.medium_url']).sum().reset_index()
 
     if norm:
         if norm == 'place':
@@ -160,7 +160,7 @@ def coming_soon(kind:str,
         common_name = row.get('taxon.preferred_common_name', 'N/A')
         image_url = row['taxon.default_photo.medium_url']
 
-        print(f"\n{taxon_name} ({common_name})")
+        print(f"\n{taxon_name} ({common_name}) - {row['taxon.wikipedia_url']}")
 
         try:
             response = requests.get(image_url)
