@@ -71,10 +71,7 @@ def coming_soon(kind:str,
    
     roadmap:
     turn names into links to iNaturalist
-    try to narrow time frame to consistently 21-day period?
     photographs should match requested phenotype where possible
-    add support for caterpillars/butterflies
-    split animals by clade and/or generalize interface?
     """
     assert not (places and loc), "only one of places and loc should be provided"
     
@@ -84,8 +81,8 @@ def coming_soon(kind:str,
 
     assert norm in [None, 'time', 'place', 'overall'], "norm must be one of None, 'time', 'place', or 'overall'"
 
-    if kind == 'animals':
-        taxa = {'taxon_id':1}
+    if kind == 'any':
+        taxa = {}
     elif kind == 'plants':
         taxa = {'taxon_name':'plants'}
     elif kind == 'flowers':
@@ -94,6 +91,20 @@ def coming_soon(kind:str,
         taxa = {'term_id':12, 'term_value_id':14}
     elif kind == 'mushrooms':
         taxa = {'taxon_id':47170}
+    elif kind == 'animals':
+        taxa = {'taxon_id':1}
+    elif kind == 'mammals':
+        taxa = {'taxon_id':40151}
+    elif kind == 'birds':
+        taxa = {'taxon_id':3}
+    elif kind == 'herps':
+        taxa = {'taxon_id':[26036, 20978]}
+    elif kind == 'wugs':
+        taxa = {'taxon_id':1, 'not_id': 355675}
+    elif kind == 'butterflies':
+        taxa = {'taxon_id': 47157, 'term_id':1, 'term_value_id':2}
+    elif kind == 'caterpillars':
+        taxa = {'taxon_id': 47157, 'term_id':1, 'term_value_id':6}
     else:
         raise ValueError(f"kind '{kind}' not implemented")
 
@@ -106,8 +117,6 @@ def coming_soon(kind:str,
     else:
         raise ValueError(f"expected loc triple of lat,long,radius")
 
-    # time = {'month':list(set( [(dt.date.today()+dt.timedelta(days=-7)).month, (dt.date.today()+dt.timedelta(days=14)).month] ))}
-    ## fancier time resolution    
     time = []
     strt = dt.date.today()+dt.timedelta(days=-7)
     fnsh = dt.date.today()+dt.timedelta(days=7)
@@ -131,14 +140,14 @@ def coming_soon(kind:str,
             normer = []
             for t in time:
                 normer.append(pd.json_normalize(inat.get_observation_species_counts(taxon_id=results['taxon.id'].to_list(), 
-                                                                                    **(taxa if 'term_value_id' in taxa.keys() else {}),
+                                                                                    **{key: value for key, value in taxa.items() if key == 'term_value_id'},
                                                                                     **t,
                                                                                     verifiable=True,)['results']))
             normer = pd.concat(normer)
             normer = normer.groupby('taxon.id')['count'].sum()
         else:
             normer = pd.json_normalize(inat.get_observation_species_counts(taxon_id=results['taxon.id'].to_list(), 
-                                                                            **(taxa if 'term_value_id' in taxa.keys() else {}),
+                                                                            **{key: value for key, value in taxa.items() if key == 'term_value_id'},
                                                                             **(place if norm=='time' else {}), 
                                                                             verifiable=True,)['results']).set_index('taxon.id')['count']
         results['normalizer'] = results['taxon.id'].map(normer)
