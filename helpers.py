@@ -21,6 +21,11 @@ with open('pyinaturalistkey.pkd', 'rb') as f:
 def get_mine(uname:str, lookback_to: dt.datetime=None, lookback_in_days: int=None, api_key: str=API_KEY) -> None:
     """
     Loads my observations by observation time (by iconic taxon?) in format appropriate for photo labels
+
+    uname: iNaturalist username
+    lookback_to: datetime object
+    lookback_in_days: int
+    api_key: str
     """
     assert not (lookback_to and lookback_in_days), "only one of lookback_to or lookback_in_days should be provided"
     
@@ -68,6 +73,11 @@ def coming_soon(kind:str,
                 limit:int=10,
                 ) -> None:
     """shows organism which have been observed in this season nearby, sorted by relative frequency.
+    kind: 'any', 'plants', 'mushrooms', 'animals', 'wugs', 'fish', 'herps', 'birds', 'mammals'
+    places: list of place ids [optional]
+    loc: (lat, long, radius) [optional]
+    norm: 'time', 'place', 'overall' [optional]
+    limit: number of results to return [optional]
    
     roadmap:
     turn names into links to iNaturalist
@@ -93,6 +103,8 @@ def coming_soon(kind:str,
         taxa = {'taxon_id':47170}
     elif kind == 'animals':
         taxa = {'taxon_id':1}
+    elif kind == 'fish':
+        taxa = {'taxon_id':47178}
     elif kind == 'mammals':
         taxa = {'taxon_id':40151}
     elif kind == 'birds':
@@ -175,4 +187,46 @@ def coming_soon(kind:str,
         ### It'd be nice to specifically select images w/ appropriate phenotype
             
     return results
+
+
+def get_park_data(geocenter:tuple, kind:str, limit:int) -> pd.DataFrame:
+    """returns the most common species in a park, sorted by relative frequency.
+    geocenter: (lat, long, radius)
+    kind: 'any', 'plants', 'mushrooms', 'animals', 'wugs', 'fish', 'herps', 'birds', 'mammals'
+    limit: number of results to return"""
+
+    if kind == 'any':
+        taxa = {}
+    elif kind == 'plants':
+        taxa = {'taxon_name':'plants'}
+    elif kind == 'mushrooms':
+        taxa = {'taxon_id':47170}
+    elif kind == 'animals':
+        taxa = {'taxon_id':1}
+    elif kind == 'wugs':
+        taxa = {'taxon_id':1, 'not_id': 355675}
+    elif kind == 'fish':
+        taxa = {'taxon_id':47178}
+    elif kind == 'herps':
+        taxa = {'taxon_id':[26036, 20978]}
+    elif kind == 'birds':
+        taxa = {'taxon_id':3}
+    elif kind == 'mammals':
+        taxa = {'taxon_id':40151}
+    else:
+        return "unknown kind"
     
+    res = pd.json_normalize(inat.get_observation_species_counts(lat=geocenter[0], 
+                                                                lng=geocenter[1], 
+                                                                radius=geocenter[2], 
+                                                                **taxa,
+                                                                verifiable=True,)['results'])
+    normer = pd.json_normalize(inat.get_observation_species_counts(taxon_id=res['taxon.id'].to_list(),
+                                                                   verifiable=True,)['results'])
+    res['normalizer'] = res['taxon.id'].map(normer.set_index('taxon.id')['count'])
+    res['sorter'] = res['count']/res['normalizer']
+    res.sort_values('sorter',ascending=False,inplace=True)
+    print(f"{kind}:")
+    if len(res)>499:
+        print('too many results; normalization may be incomplete')
+    return res[['count', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url']].head(limit)
