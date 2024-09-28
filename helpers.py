@@ -18,7 +18,11 @@ with open('pyinaturalistkey.pkd', 'rb') as f:
     API_KEY = dill.load(f)
 
 
-def get_mine(uname:str, lookback_to: dt.datetime=None, lookback_in_days: int=None, api_key: str=API_KEY) -> None:
+def get_mine(uname:str, 
+             lookback_in_days: int=None, 
+             STRT: dt.datetime=dt.date.today(), 
+             FNSH: dt.datetime=dt.date.today()+dt.timedelta(days=1), 
+             api_key: str=API_KEY) -> None:
     """
     Loads my observations by observation time (by iconic taxon?) in format appropriate for photo labels
 
@@ -27,27 +31,25 @@ def get_mine(uname:str, lookback_to: dt.datetime=None, lookback_in_days: int=Non
     lookback_in_days: int
     api_key: str
     """
-    assert not (lookback_to and lookback_in_days), "only one of lookback_to or lookback_in_days should be provided"
     
-    if not lookback_to and not lookback_in_days:
-        print('assuming lookback_in_days=1')
-        lookback_in_days = 1
-
     # Define the base URL for the iNaturalist API
     base_url = "https://api.inaturalist.org/v1/observations"
 
-    # Define the current date
-    now = dt.datetime.now()
-    if lookback_to:
-        start_date = lookback_to
+    # Define scope
+    if lookback_in_days:
+        start_date = STRT - dt.timedelta(days=lookback_in_days)
     else:
-        start_date = now - dt.timedelta(days=lookback_in_days)
+        start_date = STRT
+    end_date = FNSH
 
-    response = inat.get_observations(user_id=[uname], d1=start_date, page='all')
+    response = inat.get_observations(user_id=[uname], 
+                                     d1=start_date, 
+                                     d2=end_date,
+                                     page='all')
 
-    df = pd.json_normalize(response['results']) 
+    df = pd.json_normalize(response['results']).sort_values('observed_on')
 
-    for index, row in df.iloc[::-1].iterrows():
+    for index, row in df.iterrows():
         print(f"""\n\n{row['observed_on']:%Y%m%d} {row['taxon.name']} ({row['species_guess']}) [inat obs id: {row['id']}]""")
         try:
             # response = requests.get(row.photos[0]['url'].replace('square','small'))
@@ -130,7 +132,7 @@ def coming_soon(kind:str,
         raise ValueError(f"expected loc triple of lat,long,radius")
 
     time = []
-    strt = dt.date.today()+dt.timedelta(days=-7)
+    strt = dt.date.today()+dt.timedelta(days=-6)
     fnsh = dt.date.today()+dt.timedelta(days=7)
     dates = pd.date_range(start=strt, end=fnsh, freq='D')
     for month in dates.month.unique():
