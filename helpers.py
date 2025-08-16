@@ -47,7 +47,11 @@ def get_mine(uname:str,
                                      d2=end_date,
                                      page='all')
 
-    df = pd.json_normalize(response['results']).sort_values('observed_on')
+    df = pd.json_normalize(response['results'])
+    try:
+        df.sort_values('observed_on', inplace=True)
+    except:
+        pass
 
     for index, row in df.iterrows():
         print(f"""\n\n{row['observed_on']:%Y%m%d} {row['taxon.name']} ({row['species_guess']}) [inat obs id: {row['id']}]""")
