@@ -20,8 +20,8 @@ with open('pyinaturalistkey.pkd', 'rb') as f:
 
 def get_mine(uname:str, 
              lookback_in_days: int=None, 
-             STRT: dt.datetime=dt.date.today(), 
-             FNSH: dt.datetime=dt.date.today()+dt.timedelta(days=1), 
+             STRT: dt.date=dt.date.today(), 
+             FNSH: dt.date=dt.date.today()+dt.timedelta(days=1), 
              api_key: str=API_KEY) -> None:
     """
     Loads my observations by observation time (by iconic taxon?) in format appropriate for photo labels
