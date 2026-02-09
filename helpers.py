@@ -11,6 +11,19 @@ Logging: the module uses a package-level `logger`. Do not call
 ``logging.basicConfig`` in libraries; configure logging in your application.
 """
 
+## TODO: CoPilot suggests these:
+# Secrets: Move completely off dill and use env/keyring; add a .env.example and README notes.
+# Packaging: Add pyproject.toml (or setup.cfg) and support an editable install (pip install -e .) to make local dev and CI simpler.
+# CI: Add GitHub Actions / GitLab CI to run pytest, lint, and type checks on pushes/PRs.
+# Tests: Expand tests and coverage (edge cases, pagination, API error responses, rate limits). See test_helpers.py.
+# API robustness: Add pagination handling, request session with retries/backoff, and optional caching for repeated queries.
+# Logging & config: Provide a short example in README showing how to configure logging and where to place API keys.
+# Type checks & linting: Add mypy and flake8/ruff configs and run them in CI.
+# Image selection: Improve photo choice (prefer taxon.default_photo or filter by photo metadata like is_primary/phenotype).
+# Docs & examples: Add usage examples and a tiny CLI/runner script demonstrating get_mine and coming_soon.
+# Security audit: Consider replacing pickle/dill storage entirely (encrypted file or a secrets manager) and add a short security note in the changelog.
+
+
 import requests
 import pandas as pd
 import numpy as np
@@ -154,7 +167,7 @@ def get_mine(uname: str,
         taxon_name = row.get('taxon.name', 'Unknown')
         species_guess = row.get('species_guess', 'Unknown')
         obs_id = row.get('id')
-        print(f"\n\n{date_str} {taxon_name} ({species_guess}) [inat obs id: {obs_id}]")
+        print(f"\n\n{date_str} {taxon_name} ({species_guess}) [inat obs id: {obs_id}]   ref: www.inaturalist.org/observations/{obs_id}")
 
         photos = row.get('photos') if isinstance(row.get('photos'), list) else []
         if not photos:
