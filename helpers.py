@@ -136,6 +136,68 @@ def _get_filtered_photo_url(
 
     return fallback_url
 
+
+def _infer_nativity_from_row(row: pd.Series) -> Optional[str]:
+    """Infer nativity label from flattened taxon columns when present."""
+    candidates = [
+        row.get('taxon.establishment_means.establishment_means'),
+        row.get('taxon.establishment_means.place.id'),
+        row.get('taxon.native'),
+        row.get('taxon.introduced'),
+        row.get('taxon.endemic'),
+    ]
+
+    establishment = candidates[0]
+    if isinstance(establishment, str) and establishment.strip():
+        value = establishment.strip().lower()
+        if value in {'native', 'introduced', 'endemic'}:
+            return value.capitalize()
+
+    if candidates[4] is True:
+        return 'Endemic'
+    if candidates[2] is True:
+        return 'Native'
+    if candidates[3] is True:
+        return 'Introduced'
+    return None
+
+
+def _lookup_nativity_via_species_counts(
+    session: requests.Session,
+    taxon_id: int,
+    place_filters: dict,
+    start_date: dt.date,
+    end_date: dt.date,
+) -> str:
+    """Classify nativity with small iNaturalist count queries for one taxon."""
+    base = {
+        'taxon_id': taxon_id,
+        'verifiable': 'true',
+        'per_page': 1,
+        'd1': start_date.isoformat(),
+        'd2': end_date.isoformat(),
+        **place_filters,
+    }
+    endpoint = 'https://api.inaturalist.org/v1/observation_species_counts'
+
+    status_order = [('endemic', 'Endemic'), ('native', 'Native'), ('introduced', 'Introduced')]
+    for key, label in status_order:
+        params = {**base, key: 'true'}
+        try:
+            response = session.get(endpoint, params=params, timeout=20)
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get('results'):
+                return label
+        except Exception as e:
+            logger.debug('Nativity lookup failed for taxon %s (%s): %s', taxon_id, key, e)
+            continue
+    return 'Unknown'
+
+
+def _format_photo_title(common_name: str, scientific_name: str, nativity: str) -> str:
+    return f"{common_name}\n{scientific_name}\nNativity: {nativity}"
+
 def load_api_key(fallback_path: str = 'pyinaturalistkey.pkd') -> Union[str, None]:
     """Load an iNaturalist API key from multiple sources.
 
@@ -500,10 +562,32 @@ def coming_soon(kind: str = 'any',
             )
 
     # Display species names and their main images
+    nativity_cache = {}
     for index, row in results.head(limit).iterrows():
         taxon_name = row['taxon.name']
         common_name = row.get('taxon.preferred_common_name', 'N/A')
+        if pd.isna(common_name) or not str(common_name).strip():
+            common_name = 'N/A'
+        if pd.isna(taxon_name) or not str(taxon_name).strip():
+            taxon_name = 'Unknown'
         image_url = row['taxon.default_photo.medium_url']
+        nativity = _infer_nativity_from_row(row)
+        taxon_id = row.get('taxon.id')
+        if not nativity:
+            cache_key = int(taxon_id) if pd.notna(taxon_id) else None
+            if cache_key is None:
+                nativity = 'Unknown'
+            elif cache_key in nativity_cache:
+                nativity = nativity_cache[cache_key]
+            else:
+                nativity = _lookup_nativity_via_species_counts(
+                    session=session,
+                    taxon_id=cache_key,
+                    place_filters=place,
+                    start_date=strt,
+                    end_date=fnsh,
+                )
+                nativity_cache[cache_key] = nativity
 
         logger.info("%s (%s) - %s", taxon_name, common_name, row.get('taxon.wikipedia_url'))
 
@@ -514,9 +598,11 @@ def coming_soon(kind: str = 'any',
                 response = requests.get(image_url, timeout=10)
                 response.raise_for_status()
                 img = mpimg.imread(BytesIO(response.content), format='jpg')
-                plt.imshow(img)
-                plt.xticks([])  # Hide x tick labels
-                plt.yticks([])  # Hide y tick labels
+                fig, ax = plt.subplots()
+                ax.imshow(img)
+                ax.set_title(_format_photo_title(common_name=str(common_name), scientific_name=str(taxon_name), nativity=nativity))
+                ax.set_xticks([])
+                ax.set_yticks([])
                 plt.show()
             except requests.exceptions.RequestException as e:
                 logger.warning('Failed to load image %s: %s', image_url, e)
