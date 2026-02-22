@@ -1,5 +1,27 @@
 # work in progress
 
+## binder/public usage
+
+- Keep secrets out of git. `*.pkd` is ignored.
+- In Binder, either run anonymously or set a session-only token:
+
+```python
+import os, getpass
+token = getpass.getpass('Paste iNaturalist token (optional): ').strip()
+if token:
+	os.environ['INAT_TOKEN'] = token
+```
+
+- `coming_soon()` and `get_park_data()` now support optional REST fallback when `pyinaturalist` is unavailable.
+- For low traffic / faster runs in Binder, use smaller pages and fast mode:
+
+```python
+from pynat.helpers import coming_soon, get_park_data
+
+coming_soon('birds', loc=(37.6669, -77.8883, 25), fast=True, per_page=25, max_pages=2, fetch_images=False)
+get_park_data((37.6669, -77.8883, 5), 'plants', limit=20, per_page=25, max_pages=2)
+```
+
 ## tools for checking local observations
 
 "coming soon" by iconic taxon

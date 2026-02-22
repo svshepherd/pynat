@@ -33,7 +33,12 @@ from time import sleep
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from io import BytesIO
-import pyinaturalist as inat
+try:
+    import pyinaturalist as inat
+    HAS_PYINAT = True
+except Exception:
+    inat = None
+    HAS_PYINAT = False
 import dill
 import pickle
 import os
@@ -41,6 +46,95 @@ import ipyplot
 import logging
 
 logger = logging.getLogger(__name__)
+
+VERTEBRATES_TAXON_ID = 355675
+PHENOTYPE_IMAGE_KINDS = {'flowers', 'fruits', 'butterflies', 'caterpillars'}
+
+
+def _taxa_for_kind(kind: str) -> dict:
+    """Return iNaturalist API taxa filters for a supported kind."""
+    normalized_kind = (kind or '').lower().strip()
+    if normalized_kind == 'fruit':
+        normalized_kind = 'fruits'
+
+    if normalized_kind == 'any':
+        return {}
+    if normalized_kind == 'plants':
+        return {'taxon_name': 'plants'}
+    if normalized_kind == 'flowers':
+        return {'term_id': 12, 'term_value_id': 13}
+    if normalized_kind == 'fruits':
+        return {'term_id': 12, 'term_value_id': 14}
+    if normalized_kind == 'mushrooms':
+        return {'taxon_id': 47170}
+    if normalized_kind == 'animals':
+        return {'taxon_id': 1}
+    if normalized_kind == 'fish':
+        return {'taxon_id': 47178}
+    if normalized_kind == 'mammals':
+        return {'taxon_id': 40151}
+    if normalized_kind == 'birds':
+        return {'taxon_id': 3}
+    if normalized_kind == 'herps':
+        return {'taxon_id': [26036, 20978]}
+    if normalized_kind == 'wugs':
+        return {'taxon_id': 1, 'without_taxon_id': VERTEBRATES_TAXON_ID}
+    if normalized_kind == 'butterflies':
+        return {'taxon_id': 47157, 'term_id': 1, 'term_value_id': 2}
+    if normalized_kind == 'caterpillars':
+        return {'taxon_id': 47157, 'term_id': 1, 'term_value_id': 6}
+
+    raise ValueError(f"kind '{kind}' not implemented")
+
+
+def _extract_photo_url(observation: dict) -> Optional[str]:
+    photos = observation.get('photos') if isinstance(observation, dict) else None
+    if not isinstance(photos, list):
+        return None
+    for photo in photos:
+        if isinstance(photo, dict):
+            photo_url = photo.get('url')
+            if photo_url:
+                return photo_url.replace('square', 'medium')
+    return None
+
+
+def _get_filtered_photo_url(
+    session: requests.Session,
+    taxon_id: int,
+    taxa_filters: dict,
+    place_filters: dict,
+    start_date: dt.date,
+    end_date: dt.date,
+    fallback_url: Optional[str],
+) -> Optional[str]:
+    """Pick a representative photo from observations matching current filters."""
+    query_params = {
+        'taxon_id': taxon_id,
+        'verifiable': 'true',
+        'photos': 'true',
+        'per_page': 10,
+        'order_by': 'votes',
+        'order': 'desc',
+        'd1': start_date.isoformat(),
+        'd2': end_date.isoformat(),
+        **place_filters,
+    }
+    for key in ('term_id', 'term_value_id'):
+        if key in taxa_filters:
+            query_params[key] = taxa_filters[key]
+
+    try:
+        response = session.get('https://api.inaturalist.org/v1/observations', params=query_params, timeout=30)
+        response.raise_for_status()
+        for observation in response.json().get('results', []):
+            photo_url = _extract_photo_url(observation)
+            if photo_url:
+                return photo_url
+    except Exception as e:
+        logger.debug('Could not fetch filtered photo for taxon %s: %s', taxon_id, e)
+
+    return fallback_url
 
 def load_api_key(fallback_path: str = 'pyinaturalistkey.pkd') -> Union[str, None]:
     """Load an iNaturalist API key from multiple sources.
@@ -191,11 +285,45 @@ def get_mine(uname: str,
             logger.warning('Failed to display images for %s: %s', obs_id, e)
 
 
+def get_inat_session(token: Optional[str] = None,
+                     use_cache: bool = True,
+                     cache_name: str = 'inat_cache',
+                     expire_seconds: int = 24 * 3600) -> requests.Session:
+    """Create a requests session configured for iNaturalist.
+
+    Reads `INAT_TOKEN` from the environment if `token` is not provided.
+    Installs `requests_cache` if available and `use_cache` is True.
+    Sets the appropriate Authorization header when a token is present.
+    """
+    token = token or os.environ.get('INAT_TOKEN') or os.environ.get('INAT_API_KEY') or os.environ.get('PYINAT_API_KEY') or os.environ.get('INAT_KEY')
+
+    if use_cache:
+        try:
+            import requests_cache
+            # install_cache is safe to call multiple times; will reuse existing cache
+            requests_cache.install_cache(cache_name, expire_after=expire_seconds)
+        except Exception:
+            logger.debug('requests_cache not available; continuing without cache')
+
+    session = requests.Session()
+    if token:
+        # iNaturalist expects Token token="..." in the Authorization header for some clients
+        session.headers.update({'Authorization': f'Token token="{token}"'})
+    return session
+
+
 def coming_soon(kind: str,
                 places: list[int] = None,
                 loc: tuple[float, float, float] = None,
                 norm: str = None,
                 limit: int = 10,
+                token: Optional[str] = None,
+                session: Optional[requests.Session] = None,
+                per_page: int = 50,
+                max_pages: int = 5,
+                fetch_images: bool = False,
+                use_cache: bool = True,
+                fast: bool = False,
                 ) -> pd.DataFrame:
     """Return nearby seasonal/common taxa, optionally normalized.
 
@@ -229,34 +357,10 @@ def coming_soon(kind: str,
 
     assert norm in [None, 'time', 'place', 'overall'], "norm must be one of None, 'time', 'place', or 'overall'"
 
-    if kind == 'any':
-        taxa = {}
-    elif kind == 'plants':
-        taxa = {'taxon_name':'plants'}
-    elif kind == 'flowers':
-        taxa = {'term_id':12, 'term_value_id':13}
-    elif kind == 'fruits':
-        taxa = {'term_id':12, 'term_value_id':14}
-    elif kind == 'mushrooms':
-        taxa = {'taxon_id':47170}
-    elif kind == 'animals':
-        taxa = {'taxon_id':1}
-    elif kind == 'fish':
-        taxa = {'taxon_id':47178}
-    elif kind == 'mammals':
-        taxa = {'taxon_id':40151}
-    elif kind == 'birds':
-        taxa = {'taxon_id':3}
-    elif kind == 'herps':
-        taxa = {'taxon_id':[26036, 20978]}
-    elif kind == 'wugs':
-        taxa = {'taxon_id':1, 'not_id': 355675}
-    elif kind == 'butterflies':
-        taxa = {'taxon_id': 47157, 'term_id':1, 'term_value_id':2}
-    elif kind == 'caterpillars':
-        taxa = {'taxon_id': 47157, 'term_id':1, 'term_value_id':6}
-    else:
-        raise ValueError(f"kind '{kind}' not implemented")
+    taxa = _taxa_for_kind(kind)
+    normalized_kind = kind.lower().strip()
+    if normalized_kind == 'fruit':
+        normalized_kind = 'fruits'
 
     if places:
         place = {'place_id':places}
@@ -267,21 +371,51 @@ def coming_soon(kind: str,
     else:
         raise ValueError(f"expected loc triple of lat,long,radius")
 
+    per_page = max(1, int(per_page))
+    max_pages = max(1, int(max_pages))
+
     time = []
-    strt = dt.date.today()+dt.timedelta(days=-6)
-    fnsh = dt.date.today()+dt.timedelta(days=7)
+    if fast:
+        strt = dt.date.today()+dt.timedelta(days=-2)
+        fnsh = dt.date.today()+dt.timedelta(days=3)
+    else:
+        strt = dt.date.today()+dt.timedelta(days=-6)
+        fnsh = dt.date.today()+dt.timedelta(days=7)
     dates = pd.date_range(start=strt, end=fnsh, freq='D')
     for month in dates.month.unique():
         time.append({'month':month, 'day':list(dates[dates.month==month].day)})
 
     COLS = ['taxon.id', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url', 'taxon.default_photo.medium_url', 'count']
 
+    # Prepare session if needed (fallback path)
+    if session is None:
+        session = get_inat_session(token=token, use_cache=use_cache)
+
     results = []
     for t in time:
-        results.append(pd.json_normalize(inat.get_observation_species_counts(verifiable=True,
-                                                                            **taxa,
-                                                                            **t,
-                                                                            **place,)['results']))
+        if HAS_PYINAT:
+            resp = inat.get_observation_species_counts(verifiable=True, per_page=per_page, **taxa, **t, **place)
+            frames = pd.json_normalize(resp.get('results', []))
+        else:
+            # fallback to direct REST API with bounded pagination
+            url = "https://api.inaturalist.org/v1/observation_species_counts"
+            chunk_frames = []
+            for page in range(1, max_pages + 1):
+                params = {**taxa, **t, **place, 'verifiable': 'true', 'per_page': per_page, 'page': page}
+                try:
+                    r = session.get(url, params=params, timeout=30)
+                    r.raise_for_status()
+                    page_df = pd.json_normalize(r.json().get('results', []))
+                    if page_df.empty:
+                        break
+                    chunk_frames.append(page_df)
+                    if len(page_df) < per_page:
+                        break
+                except Exception as e:
+                    logger.warning('Failed REST call for observation_species_counts: %s', e)
+                    break
+            frames = pd.concat(chunk_frames, ignore_index=True) if chunk_frames else pd.DataFrame()
+        results.append(frames)
     results = pd.concat(results)[COLS]
     results = results.groupby(['taxon.id', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url', 'taxon.default_photo.medium_url']).sum().reset_index()
 
@@ -297,8 +431,27 @@ def coming_soon(kind: str,
             extra_kwargs = extra_kwargs or {}
             for i in range(0, len(taxon_ids_list), chunk_size):
                 chunk = taxon_ids_list[i:i + chunk_size]
-                resp = inat.get_observation_species_counts(taxon_id=chunk, verifiable=True, **extra_kwargs)
-                df = pd.json_normalize(resp.get('results', []))
+                if HAS_PYINAT:
+                    resp = inat.get_observation_species_counts(taxon_id=chunk, verifiable=True, per_page=per_page, **extra_kwargs)
+                    df = pd.json_normalize(resp.get('results', []))
+                else:
+                    url = "https://api.inaturalist.org/v1/observation_species_counts"
+                    page_frames = []
+                    for page in range(1, max_pages + 1):
+                        params = {**extra_kwargs, 'taxon_id': chunk, 'verifiable': 'true', 'per_page': per_page, 'page': page}
+                        try:
+                            r = session.get(url, params=params, timeout=30)
+                            r.raise_for_status()
+                            page_df = pd.json_normalize(r.json().get('results', []))
+                            if page_df.empty:
+                                break
+                            page_frames.append(page_df)
+                            if len(page_df) < per_page:
+                                break
+                        except Exception as e:
+                            logger.warning('Failed REST call for chunked observation_species_counts: %s', e)
+                            break
+                    df = pd.concat(page_frames, ignore_index=True) if page_frames else pd.DataFrame()
                 if not df.empty:
                     frames.append(df)
             return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -307,7 +460,7 @@ def coming_soon(kind: str,
             results['normalizer'] = np.nan
             results['sorter'] = 0
         else:
-            extra = {key: value for key, value in taxa.items() if key == 'term_value_id'}
+            extra = {key: value for key, value in taxa.items() if key in {'term_id', 'term_value_id'}}
             if norm == 'place':
                 frames = []
                 for t in time:
@@ -325,9 +478,25 @@ def coming_soon(kind: str,
                 normer_series = pd.Series(dtype=float)
 
             results['normalizer'] = results['taxon.id'].map(normer_series).astype(float)
-            results['normalizer'].replace(0, np.nan, inplace=True)
+            results['normalizer'] = results['normalizer'].replace(0, np.nan)
             results['sorter'] = results['count'].astype(float).div(results['normalizer']).fillna(0)
             results.sort_values('sorter', ascending=False, inplace=True)
+
+    if normalized_kind in PHENOTYPE_IMAGE_KINDS and not results.empty:
+        for idx in results.head(limit).index:
+            taxon_id = results.at[idx, 'taxon.id']
+            if pd.isna(taxon_id):
+                continue
+            fallback_url = results.at[idx, 'taxon.default_photo.medium_url']
+            results.at[idx, 'taxon.default_photo.medium_url'] = _get_filtered_photo_url(
+                session=session,
+                taxon_id=int(taxon_id),
+                taxa_filters=taxa,
+                place_filters=place,
+                start_date=strt,
+                end_date=fnsh,
+                fallback_url=fallback_url,
+            )
 
     # Display species names and their main images
     for index, row in results.head(limit).iterrows():
@@ -337,26 +506,27 @@ def coming_soon(kind: str,
 
         logger.info("%s (%s) - %s", taxon_name, common_name, row.get('taxon.wikipedia_url'))
 
-        try:
-            if not image_url:
-                raise ValueError('No image URL')
-            response = requests.get(image_url, timeout=10)
-            response.raise_for_status()
-            img = mpimg.imread(BytesIO(response.content), format='jpg')
-            plt.imshow(img)
-            plt.xticks([])  # Hide x tick labels
-            plt.yticks([])  # Hide y tick labels
-            plt.show()
-        except requests.exceptions.RequestException as e:
-            logger.warning('Failed to load image %s: %s', image_url, e)
-        except Exception as e:
-            logger.debug('Skipping image display for %s: %s', image_url, e)
+        if fetch_images:
+            try:
+                if not image_url:
+                    raise ValueError('No image URL')
+                response = requests.get(image_url, timeout=10)
+                response.raise_for_status()
+                img = mpimg.imread(BytesIO(response.content), format='jpg')
+                plt.imshow(img)
+                plt.xticks([])  # Hide x tick labels
+                plt.yticks([])  # Hide y tick labels
+                plt.show()
+            except requests.exceptions.RequestException as e:
+                logger.warning('Failed to load image %s: %s', image_url, e)
+            except Exception as e:
+                logger.debug('Skipping image display for %s: %s', image_url, e)
         ### It'd be nice to specifically select images w/ appropriate phenotype
             
     return results
 
 
-def get_park_data(geocenter:tuple, kind:str, limit:int) -> pd.DataFrame:
+def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = None, session: Optional[requests.Session] = None, use_cache: bool = True, per_page: int = 50, max_pages: int = 5) -> pd.DataFrame:
     """Return the most common species in a park, sorted by relative frequency.
 
     Parameters
@@ -377,32 +547,39 @@ def get_park_data(geocenter:tuple, kind:str, limit:int) -> pd.DataFrame:
     """
     logger.debug('get_park_data called geocenter=%s kind=%s limit=%s', geocenter, kind, limit)
 
-    if kind == 'any':
-        taxa = {}
-    elif kind == 'plants':
-        taxa = {'taxon_name':'plants'}
-    elif kind == 'mushrooms':
-        taxa = {'taxon_id':47170}
-    elif kind == 'animals':
-        taxa = {'taxon_id':1}
-    elif kind == 'wugs':
-        taxa = {'taxon_id':1, 'not_id': 355675}
-    elif kind == 'fish':
-        taxa = {'taxon_id':47178}
-    elif kind == 'herps':
-        taxa = {'taxon_id':[26036, 20978]}
-    elif kind == 'birds':
-        taxa = {'taxon_id':3}
-    elif kind == 'mammals':
-        taxa = {'taxon_id':40151}
-    else:
-        raise ValueError(f"Unknown kind: {kind}")
+    taxa = _taxa_for_kind(kind)
     
-    res = pd.json_normalize(inat.get_observation_species_counts(lat=geocenter[0], 
-                                                                lng=geocenter[1], 
-                                                                radius=geocenter[2], 
-                                                                **taxa,
-                                                                verifiable=True,)['results'])
+    if session is None:
+        session = get_inat_session(token=token, use_cache=use_cache)
+
+    per_page = max(1, int(per_page))
+    max_pages = max(1, int(max_pages))
+
+    if HAS_PYINAT:
+        res = pd.json_normalize(inat.get_observation_species_counts(lat=geocenter[0], 
+                                                                    lng=geocenter[1], 
+                                                                    radius=geocenter[2], 
+                                                                    **taxa,
+                                                                    verifiable=True,
+                                                                    per_page=per_page,)['results'])
+    else:
+        url = "https://api.inaturalist.org/v1/observation_species_counts"
+        frames = []
+        for page in range(1, max_pages + 1):
+            params = {**taxa, 'lat': geocenter[0], 'lng': geocenter[1], 'radius': geocenter[2], 'verifiable': 'true', 'per_page': per_page, 'page': page}
+            try:
+                r = session.get(url, params=params, timeout=30)
+                r.raise_for_status()
+                page_df = pd.json_normalize(r.json().get('results', []))
+                if page_df.empty:
+                    break
+                frames.append(page_df)
+                if len(page_df) < per_page:
+                    break
+            except Exception as e:
+                logger.warning('Failed REST call for park observation_species_counts: %s', e)
+                break
+        res = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if res.empty:
         return pd.DataFrame(columns=['count', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url']).head(limit)
     res['count'] = pd.to_numeric(res.get('count', pd.Series(dtype=float)), errors='coerce').fillna(0)
@@ -412,8 +589,27 @@ def get_park_data(geocenter:tuple, kind:str, limit:int) -> pd.DataFrame:
         frames = []
         for i in range(0, len(taxon_ids_list), chunk_size):
             chunk = taxon_ids_list[i:i + chunk_size]
-            r = inat.get_observation_species_counts(taxon_id=chunk, verifiable=True)
-            df = pd.json_normalize(r.get('results', []))
+            if HAS_PYINAT:
+                r = inat.get_observation_species_counts(taxon_id=chunk, verifiable=True, per_page=per_page)
+                df = pd.json_normalize(r.get('results', []))
+            else:
+                url = "https://api.inaturalist.org/v1/observation_species_counts"
+                page_frames = []
+                for page in range(1, max_pages + 1):
+                    params = {'taxon_id': chunk, 'verifiable': 'true', 'per_page': per_page, 'page': page}
+                    try:
+                        rr = session.get(url, params=params, timeout=30)
+                        rr.raise_for_status()
+                        page_df = pd.json_normalize(rr.json().get('results', []))
+                        if page_df.empty:
+                            break
+                        page_frames.append(page_df)
+                        if len(page_df) < per_page:
+                            break
+                    except Exception as e:
+                        logger.warning('Failed REST call for chunked park counts: %s', e)
+                        break
+                df = pd.concat(page_frames, ignore_index=True) if page_frames else pd.DataFrame()
             if not df.empty:
                 frames.append(df)
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -429,7 +625,7 @@ def get_park_data(geocenter:tuple, kind:str, limit:int) -> pd.DataFrame:
             normer = pd.Series(dtype=float)
 
         res['normalizer'] = res['taxon.id'].map(normer).astype(float)
-        res['normalizer'].replace(0, np.nan, inplace=True)
+        res['normalizer'] = res['normalizer'].replace(0, np.nan)
         res['sorter'] = res['count'].astype(float).div(res['normalizer']).fillna(0)
         res.sort_values('sorter',ascending=False,inplace=True)
 
