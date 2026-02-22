@@ -44,6 +44,13 @@ import pickle
 import os
 import ipyplot
 import logging
+try:
+    from IPython.display import HTML, display
+    HAS_IPYTHON_DISPLAY = True
+except Exception:
+    HTML = None
+    display = None
+    HAS_IPYTHON_DISPLAY = False
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +258,7 @@ def _lookup_nativity_via_species_counts(
 
     endpoint = 'https://api.inaturalist.org/v1/observations/species_counts'
 
-    status_order = [('endemic', 'Endemic'), ('native', 'Native'), ('introduced', 'Introduced')]
+    status_order = [('endemic', 'Endemic'), ('introduced', 'Introduced'), ('native', 'Native')]
 
     def _search_statuses(query_base: dict) -> Optional[str]:
         for key, label in status_order:
@@ -676,6 +683,7 @@ def coming_soon(kind: str = 'any',
     for index, row in results.head(limit).iterrows():
         taxon_name = row['taxon.name']
         common_name = row.get('taxon.preferred_common_name', 'N/A')
+        wiki_url = row.get('taxon.wikipedia_url')
         if pd.isna(common_name) or not str(common_name).strip():
             common_name = 'N/A'
         if pd.isna(taxon_name) or not str(taxon_name).strip():
@@ -708,6 +716,9 @@ def coming_soon(kind: str = 'any',
                 response = requests.get(image_url, timeout=10)
                 response.raise_for_status()
                 img = mpimg.imread(BytesIO(response.content), format='jpg')
+                if HAS_IPYTHON_DISPLAY and isinstance(wiki_url, str) and wiki_url.strip():
+                    label = f"{common_name} — {taxon_name}"
+                    display(HTML(f'<div style="margin: 0.2em 0 0.4em 0;"><a href="{wiki_url}" target="_blank" rel="noopener noreferrer">{label}</a></div>'))
                 fig, ax = plt.subplots()
                 ax.imshow(img)
                 ax.set_title(_format_photo_title(common_name=str(common_name), scientific_name=str(taxon_name), nativity=nativity))
