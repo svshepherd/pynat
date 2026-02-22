@@ -49,7 +49,6 @@ logger = logging.getLogger(__name__)
 
 VERTEBRATES_TAXON_ID = 355675
 PHENOTYPE_IMAGE_KINDS = {'flowers', 'fruits', 'butterflies', 'caterpillars'}
-DEFAULT_NATIVITY_PLACE_ID = 1297  # Virginia
 
 
 def _taxa_for_kind(kind: str) -> dict:
@@ -105,8 +104,7 @@ def _get_filtered_photo_url(
     taxon_id: int,
     taxa_filters: dict,
     place_filters: dict,
-    start_date: dt.date,
-    end_date: dt.date,
+    time_filters: list[dict],
     fallback_url: Optional[str],
 ) -> Optional[str]:
     """Pick a representative photo from observations matching current filters."""
@@ -117,23 +115,38 @@ def _get_filtered_photo_url(
         'per_page': 10,
         'order_by': 'votes',
         'order': 'desc',
-        'd1': start_date.isoformat(),
-        'd2': end_date.isoformat(),
         **place_filters,
     }
     for key in ('term_id', 'term_value_id'):
         if key in taxa_filters:
             query_params[key] = taxa_filters[key]
 
-    try:
-        response = session.get('https://api.inaturalist.org/v1/observations', params=query_params, timeout=30)
-        response.raise_for_status()
-        for observation in response.json().get('results', []):
-            photo_url = _extract_photo_url(observation)
-            if photo_url:
-                return photo_url
-    except Exception as e:
-        logger.debug('Could not fetch filtered photo for taxon %s: %s', taxon_id, e)
+    endpoint = 'https://api.inaturalist.org/v1/observations'
+
+    def _query_one(params: dict) -> Optional[str]:
+        try:
+            response = session.get(endpoint, params=params, timeout=30)
+            response.raise_for_status()
+            for observation in response.json().get('results', []):
+                photo_url = _extract_photo_url(observation)
+                if photo_url:
+                    return photo_url
+        except Exception as e:
+            logger.debug('Could not fetch filtered photo for taxon %s: %s', taxon_id, e)
+        return None
+
+    for tf in time_filters:
+        month = tf.get('month')
+        days = tf.get('day')
+        if month is None or not days:
+            continue
+        photo_url = _query_one({**query_params, 'month': int(month), 'day': [int(d) for d in days]})
+        if photo_url:
+            return photo_url
+
+    photo_url = _query_one(query_params)
+    if photo_url:
+        return photo_url
 
     return fallback_url
 
@@ -166,12 +179,8 @@ def _infer_nativity_from_row(row: pd.Series) -> Optional[str]:
 def _lookup_nativity_via_species_counts(
     session: requests.Session,
     taxon_id: int,
-    reference_place_id: Optional[int] = DEFAULT_NATIVITY_PLACE_ID,
 ) -> str:
     """Classify nativity with small iNaturalist count queries for one taxon.
-
-    Uses a broad place-level reference first (default: Virginia), then falls
-    back to global checks if place-scoped checks return no evidence.
     """
     base = {
         'taxon_id': taxon_id,
@@ -179,8 +188,6 @@ def _lookup_nativity_via_species_counts(
         'per_page': 1,
     }
     endpoint = 'https://api.inaturalist.org/v1/observations/species_counts'
-    if reference_place_id is not None:
-        base['place_id'] = int(reference_place_id)
 
     status_order = [('endemic', 'Endemic'), ('native', 'Native'), ('introduced', 'Introduced')]
 
@@ -198,14 +205,9 @@ def _lookup_nativity_via_species_counts(
                 continue
         return None
 
-    place_result = _search_statuses(base)
-    if place_result:
-        return place_result
-
-    global_base = {k: v for k, v in base.items() if k != 'place_id'}
-    global_result = _search_statuses(global_base)
-    if global_result:
-        return global_result
+    result = _search_statuses(base)
+    if result:
+        return result
 
     return 'Unknown'
 
@@ -400,8 +402,7 @@ def coming_soon(kind: str = 'any',
                 max_pages: int = 5,
                 fetch_images: bool = False,
                 use_cache: bool = True,
-                fast: bool = False,
-                nativity_place_id: Optional[int] = DEFAULT_NATIVITY_PLACE_ID,
+                lineage_filter: str = 'any',
                 ) -> pd.DataFrame:
     """Return nearby seasonal/common taxa, optionally normalized.
 
@@ -419,9 +420,9 @@ def coming_soon(kind: str = 'any',
         ``'overall'`` frequency to produce a relative ranking.
     limit:
         Maximum number of species rows to return.
-    nativity_place_id:
-        Place ID used to infer nativity labels when rendering photos.
-        Defaults to Virginia (1297). Set to ``None`` to skip place scoping.
+    lineage_filter:
+        Optional nativity filter. Supported values are ``'any'`` (default),
+        ``'native_endemic'``, and ``'introduced'``.
 
     Returns
     -------
@@ -438,6 +439,7 @@ def coming_soon(kind: str = 'any',
         loc = (37.6669, -77.8883, 25)
 
     assert norm in [None, 'time', 'place', 'overall'], "norm must be one of None, 'time', 'place', or 'overall'"
+    assert lineage_filter in ['any', 'native_endemic', 'introduced'], "lineage_filter must be one of 'any', 'native_endemic', or 'introduced'"
 
     taxa = _taxa_for_kind(kind)
     normalized_kind = kind.lower().strip()
@@ -457,12 +459,8 @@ def coming_soon(kind: str = 'any',
     max_pages = max(1, int(max_pages))
 
     time = []
-    if fast:
-        strt = dt.date.today()+dt.timedelta(days=-2)
-        fnsh = dt.date.today()+dt.timedelta(days=3)
-    else:
-        strt = dt.date.today()+dt.timedelta(days=-6)
-        fnsh = dt.date.today()+dt.timedelta(days=7)
+    strt = dt.date.today()+dt.timedelta(days=-6)
+    fnsh = dt.date.today()+dt.timedelta(days=7)
     dates = pd.date_range(start=strt, end=fnsh, freq='D')
     for month in dates.month.unique():
         time.append({'month':month, 'day':list(dates[dates.month==month].day)})
@@ -575,13 +573,31 @@ def coming_soon(kind: str = 'any',
                 taxon_id=int(taxon_id),
                 taxa_filters=taxa,
                 place_filters=place,
-                start_date=strt,
-                end_date=fnsh,
+                time_filters=time,
                 fallback_url=fallback_url,
             )
 
-    # Display species names and their main images
     nativity_cache = {}
+    if lineage_filter != 'any' and not results.empty:
+        for idx in results.index:
+            taxon_id = results.at[idx, 'taxon.id']
+            if pd.isna(taxon_id):
+                results.at[idx, 'nativity'] = 'Unknown'
+                continue
+            cache_key = int(taxon_id)
+            if cache_key not in nativity_cache:
+                nativity_cache[cache_key] = _lookup_nativity_via_species_counts(
+                    session=session,
+                    taxon_id=cache_key,
+                )
+            results.at[idx, 'nativity'] = nativity_cache[cache_key]
+
+        if lineage_filter == 'introduced':
+            results = results[results['nativity'] == 'Introduced']
+        else:
+            results = results[results['nativity'].isin(['Native', 'Endemic'])]
+
+    # Display species names and their main images
     for index, row in results.head(limit).iterrows():
         taxon_name = row['taxon.name']
         common_name = row.get('taxon.preferred_common_name', 'N/A')
@@ -596,13 +612,14 @@ def coming_soon(kind: str = 'any',
             cache_key = int(taxon_id) if pd.notna(taxon_id) else None
             if cache_key is None:
                 nativity = 'Unknown'
+            elif 'nativity' in results.columns and pd.notna(row.get('nativity')):
+                nativity = row.get('nativity')
             elif cache_key in nativity_cache:
                 nativity = nativity_cache[cache_key]
             else:
                 nativity = _lookup_nativity_via_species_counts(
                     session=session,
                     taxon_id=cache_key,
-                    reference_place_id=nativity_place_id,
                 )
                 nativity_cache[cache_key] = nativity
 
