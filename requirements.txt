@@ -1,0 +1,8 @@
+pandas
+numpy
+requests
+requests-cache
+matplotlib
+ipyplot
+dill
+pyinaturalist
