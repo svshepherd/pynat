@@ -2,7 +2,7 @@
 
 ## binder/public usage
 
-- Keep secrets out of git. `*.pkd` is ignored.
+- View in Binder here: https://mybinder.org/v2/gh/svshepherd/pynat/HEAD
 - In Binder, either run anonymously or set a session-only token:
 
 ```python
