@@ -3,6 +3,7 @@
 ## binder/public usage
 
 - View in Binder here: https://mybinder.org/v2/gh/svshepherd/pynat/HEAD
+- Select "coming soon near you" notebook
 - In Binder, either run anonymously or set a session-only token:
 
 ```python
