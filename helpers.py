@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 VERTEBRATES_TAXON_ID = 355675
 PHENOTYPE_IMAGE_KINDS = {'flowers', 'fruits', 'butterflies', 'caterpillars'}
+DEFAULT_NATIVITY_PLACE_ID = 1297  # Virginia
 
 
 def _taxa_for_kind(kind: str) -> dict:
@@ -165,33 +166,47 @@ def _infer_nativity_from_row(row: pd.Series) -> Optional[str]:
 def _lookup_nativity_via_species_counts(
     session: requests.Session,
     taxon_id: int,
-    place_filters: dict,
-    start_date: dt.date,
-    end_date: dt.date,
+    reference_place_id: Optional[int] = DEFAULT_NATIVITY_PLACE_ID,
 ) -> str:
-    """Classify nativity with small iNaturalist count queries for one taxon."""
+    """Classify nativity with small iNaturalist count queries for one taxon.
+
+    Uses a broad place-level reference first (default: Virginia), then falls
+    back to global checks if place-scoped checks return no evidence.
+    """
     base = {
         'taxon_id': taxon_id,
         'verifiable': 'true',
         'per_page': 1,
-        'd1': start_date.isoformat(),
-        'd2': end_date.isoformat(),
-        **place_filters,
     }
-    endpoint = 'https://api.inaturalist.org/v1/observation_species_counts'
+    endpoint = 'https://api.inaturalist.org/v1/observations/species_counts'
+    if reference_place_id is not None:
+        base['place_id'] = int(reference_place_id)
 
     status_order = [('endemic', 'Endemic'), ('native', 'Native'), ('introduced', 'Introduced')]
-    for key, label in status_order:
-        params = {**base, key: 'true'}
-        try:
-            response = session.get(endpoint, params=params, timeout=20)
-            response.raise_for_status()
-            payload = response.json()
-            if payload.get('results'):
-                return label
-        except Exception as e:
-            logger.debug('Nativity lookup failed for taxon %s (%s): %s', taxon_id, key, e)
-            continue
+
+    def _search_statuses(query_base: dict) -> Optional[str]:
+        for key, label in status_order:
+            params = {**query_base, key: 'true'}
+            try:
+                response = session.get(endpoint, params=params, timeout=20)
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get('results'):
+                    return label
+            except Exception as e:
+                logger.debug('Nativity lookup failed for taxon %s (%s): %s', taxon_id, key, e)
+                continue
+        return None
+
+    place_result = _search_statuses(base)
+    if place_result:
+        return place_result
+
+    global_base = {k: v for k, v in base.items() if k != 'place_id'}
+    global_result = _search_statuses(global_base)
+    if global_result:
+        return global_result
+
     return 'Unknown'
 
 
@@ -386,6 +401,7 @@ def coming_soon(kind: str = 'any',
                 fetch_images: bool = False,
                 use_cache: bool = True,
                 fast: bool = False,
+                nativity_place_id: Optional[int] = DEFAULT_NATIVITY_PLACE_ID,
                 ) -> pd.DataFrame:
     """Return nearby seasonal/common taxa, optionally normalized.
 
@@ -403,6 +419,9 @@ def coming_soon(kind: str = 'any',
         ``'overall'`` frequency to produce a relative ranking.
     limit:
         Maximum number of species rows to return.
+    nativity_place_id:
+        Place ID used to infer nativity labels when rendering photos.
+        Defaults to Virginia (1297). Set to ``None`` to skip place scoping.
 
     Returns
     -------
@@ -461,7 +480,7 @@ def coming_soon(kind: str = 'any',
             frames = pd.json_normalize(resp.get('results', []))
         else:
             # fallback to direct REST API with bounded pagination
-            url = "https://api.inaturalist.org/v1/observation_species_counts"
+            url = "https://api.inaturalist.org/v1/observations/species_counts"
             chunk_frames = []
             for page in range(1, max_pages + 1):
                 params = {**taxa, **t, **place, 'verifiable': 'true', 'per_page': per_page, 'page': page}
@@ -498,7 +517,7 @@ def coming_soon(kind: str = 'any',
                     resp = inat.get_observation_species_counts(taxon_id=chunk, verifiable=True, per_page=per_page, **extra_kwargs)
                     df = pd.json_normalize(resp.get('results', []))
                 else:
-                    url = "https://api.inaturalist.org/v1/observation_species_counts"
+                    url = "https://api.inaturalist.org/v1/observations/species_counts"
                     page_frames = []
                     for page in range(1, max_pages + 1):
                         params = {**extra_kwargs, 'taxon_id': chunk, 'verifiable': 'true', 'per_page': per_page, 'page': page}
@@ -583,9 +602,7 @@ def coming_soon(kind: str = 'any',
                 nativity = _lookup_nativity_via_species_counts(
                     session=session,
                     taxon_id=cache_key,
-                    place_filters=place,
-                    start_date=strt,
-                    end_date=fnsh,
+                    reference_place_id=nativity_place_id,
                 )
                 nativity_cache[cache_key] = nativity
 
@@ -650,7 +667,7 @@ def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = N
                                                                     verifiable=True,
                                                                     per_page=per_page,)['results'])
     else:
-        url = "https://api.inaturalist.org/v1/observation_species_counts"
+        url = "https://api.inaturalist.org/v1/observations/species_counts"
         frames = []
         for page in range(1, max_pages + 1):
             params = {**taxa, 'lat': geocenter[0], 'lng': geocenter[1], 'radius': geocenter[2], 'verifiable': 'true', 'per_page': per_page, 'page': page}
@@ -680,7 +697,7 @@ def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = N
                 r = inat.get_observation_species_counts(taxon_id=chunk, verifiable=True, per_page=per_page)
                 df = pd.json_normalize(r.get('results', []))
             else:
-                url = "https://api.inaturalist.org/v1/observation_species_counts"
+                url = "https://api.inaturalist.org/v1/observations/species_counts"
                 page_frames = []
                 for page in range(1, max_pages + 1):
                     params = {'taxon_id': chunk, 'verifiable': 'true', 'per_page': per_page, 'page': page}
