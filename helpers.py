@@ -49,6 +49,64 @@ logger = logging.getLogger(__name__)
 
 VERTEBRATES_TAXON_ID = 355675
 PHENOTYPE_IMAGE_KINDS = {'flowers', 'fruits', 'butterflies', 'caterpillars'}
+DEFAULT_NATIVITY_PLACE_ID = 1297  # Virginia
+
+
+def _derive_place_id_from_location(
+    session: requests.Session,
+    lat: float,
+    lng: float,
+    fallback_place_id: int = DEFAULT_NATIVITY_PLACE_ID,
+) -> int:
+    """Derive a regional place id from coordinates (prefer state/province)."""
+    endpoint = 'https://api.inaturalist.org/v1/places/nearby'
+    try:
+        response = session.get(endpoint, params={'lat': lat, 'lng': lng, 'per_page': 30}, timeout=20)
+        response.raise_for_status()
+        nearby = response.json().get('results', [])
+    except Exception as e:
+        logger.debug('Failed to derive nativity place from location (%s,%s): %s', lat, lng, e)
+        return int(fallback_place_id)
+
+    normalized = []
+    for item in nearby:
+        if not isinstance(item, dict):
+            continue
+        place = item.get('place') if isinstance(item.get('place'), dict) else item
+        if isinstance(place, dict) and place.get('id') is not None:
+            normalized.append(place)
+
+    for place in normalized:
+        if place.get('admin_level') == 10:
+            return int(place['id'])
+
+    if normalized:
+        return int(normalized[0]['id'])
+    return int(fallback_place_id)
+
+
+def _resolve_nativity_place_id(
+    session: requests.Session,
+    nativity_place_id: Union[int, str, None],
+    places: Optional[list[int]],
+    loc: Optional[tuple[float, float, float]],
+) -> Optional[int]:
+    """Resolve nativity place id from explicit value, auto mode, or global mode."""
+    if nativity_place_id is None:
+        return None
+
+    if isinstance(nativity_place_id, str):
+        mode = nativity_place_id.strip().lower()
+        if mode != 'auto':
+            raise ValueError("nativity_place_id must be an int, None, or 'auto'")
+
+        if places and len(places) > 0:
+            return int(places[0])
+        if isinstance(loc, tuple) and len(loc) == 3:
+            return _derive_place_id_from_location(session=session, lat=float(loc[0]), lng=float(loc[1]))
+        return int(DEFAULT_NATIVITY_PLACE_ID)
+
+    return int(nativity_place_id)
 
 
 def _taxa_for_kind(kind: str) -> dict:
@@ -179,6 +237,7 @@ def _infer_nativity_from_row(row: pd.Series) -> Optional[str]:
 def _lookup_nativity_via_species_counts(
     session: requests.Session,
     taxon_id: int,
+    nativity_place_id: Optional[int] = None,
 ) -> str:
     """Classify nativity with small iNaturalist count queries for one taxon.
     """
@@ -187,6 +246,9 @@ def _lookup_nativity_via_species_counts(
         'verifiable': 'true',
         'per_page': 1,
     }
+    if nativity_place_id is not None:
+        base['place_id'] = int(nativity_place_id)
+
     endpoint = 'https://api.inaturalist.org/v1/observations/species_counts'
 
     status_order = [('endemic', 'Endemic'), ('native', 'Native'), ('introduced', 'Introduced')]
@@ -403,6 +465,7 @@ def coming_soon(kind: str = 'any',
                 fetch_images: bool = False,
                 use_cache: bool = True,
                 lineage_filter: str = 'any',
+                nativity_place_id: Union[int, str, None] = 'auto',
                 ) -> pd.DataFrame:
     """Return nearby seasonal/common taxa, optionally normalized.
 
@@ -423,6 +486,10 @@ def coming_soon(kind: str = 'any',
     lineage_filter:
         Optional nativity filter. Supported values are ``'any'`` (default),
         ``'native_endemic'``, and ``'introduced'``.
+    nativity_place_id:
+        Optional place scope used when inferring nativity. Use ``'auto'``
+        (default) to derive region from query context, an integer place ID
+        (e.g. ``1297`` for Virginia), or ``None`` for global nativity checks.
 
     Returns
     -------
@@ -470,6 +537,13 @@ def coming_soon(kind: str = 'any',
     # Prepare session if needed (fallback path)
     if session is None:
         session = get_inat_session(token=token, use_cache=use_cache)
+
+    resolved_nativity_place_id = _resolve_nativity_place_id(
+        session=session,
+        nativity_place_id=nativity_place_id,
+        places=places,
+        loc=loc,
+    )
 
     results = []
     for t in time:
@@ -589,6 +663,7 @@ def coming_soon(kind: str = 'any',
                 nativity_cache[cache_key] = _lookup_nativity_via_species_counts(
                     session=session,
                     taxon_id=cache_key,
+                    nativity_place_id=resolved_nativity_place_id,
                 )
             results.at[idx, 'nativity'] = nativity_cache[cache_key]
 
@@ -620,6 +695,7 @@ def coming_soon(kind: str = 'any',
                 nativity = _lookup_nativity_via_species_counts(
                     session=session,
                     taxon_id=cache_key,
+                    nativity_place_id=resolved_nativity_place_id,
                 )
                 nativity_cache[cache_key] = nativity
 
