@@ -312,7 +312,7 @@ def get_inat_session(token: Optional[str] = None,
     return session
 
 
-def coming_soon(kind: str,
+def coming_soon(kind: str = 'any',
                 places: list[int] = None,
                 loc: tuple[float, float, float] = None,
                 norm: str = None,
@@ -331,6 +331,7 @@ def coming_soon(kind: str,
     ----------
     kind:
         One of the supported kinds; e.g. ``'any'``, ``'plants'``, ``'birds'``.
+        Defaults to ``'any'`` when omitted.
     places:
         Optional list of iNaturalist place IDs to scope the query.
     loc:
