@@ -11,24 +11,11 @@ Logging: the module uses a package-level `logger`. Do not call
 ``logging.basicConfig`` in libraries; configure logging in your application.
 """
 
-## TODO: CoPilot suggests these:
-# Secrets: Move completely off dill and use env/keyring; add a .env.example and README notes.
-# Packaging: Add pyproject.toml (or setup.cfg) and support an editable install (pip install -e .) to make local dev and CI simpler.
-# CI: Add GitHub Actions / GitLab CI to run pytest, lint, and type checks on pushes/PRs.
-# Tests: Expand tests and coverage (edge cases, pagination, API error responses, rate limits). See test_helpers.py.
-# API robustness: Add pagination handling, request session with retries/backoff, and optional caching for repeated queries.
-# Logging & config: Provide a short example in README showing how to configure logging and where to place API keys.
-# Type checks & linting: Add mypy and flake8/ruff configs and run them in CI.
-# Image selection: Improve photo choice (prefer taxon.default_photo or filter by photo metadata like is_primary/phenotype).
-# Docs & examples: Add usage examples and a tiny CLI/runner script demonstrating get_mine and coming_soon.
-# Security audit: Consider replacing pickle/dill storage entirely (encrypted file or a secrets manager) and add a short security note in the changelog.
-
-
 import requests
 import pandas as pd
 import numpy as np
 import datetime as dt
-from typing import Tuple, Union, Optional
+from typing import Tuple, Union, Optional, Any
 from time import sleep
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
@@ -45,11 +32,12 @@ import os
 import ipyplot
 import logging
 try:
-    from IPython.display import HTML, display
+    from IPython.display import HTML, display, Markdown
     HAS_IPYTHON_DISPLAY = True
 except Exception:
     HTML = None
     display = None
+    Markdown = None
     HAS_IPYTHON_DISPLAY = False
 
 logger = logging.getLogger(__name__)
@@ -288,9 +276,13 @@ def load_api_key(fallback_path: str = 'pyinaturalistkey.pkd') -> Union[str, None
     """Load an iNaturalist API key from multiple sources.
 
     Order of attempts:
-    1. Environment variables: ``INAT_API_KEY``, ``PYINAT_API_KEY``, ``INAT_KEY``
+    1. Environment variables: ``INAT_TOKEN``, ``INAT_API_KEY``, ``PYINAT_API_KEY``, ``INAT_KEY``
     2. System keyring (optional ``keyring`` package)
-    3. Fallback dill file at ``fallback_path`` (legacy behavior)
+    3. Fallback dill file lookup (legacy behavior) using the first readable path:
+       - ``fallback_path`` as provided
+       - ``cwd/<filename>`` when ``fallback_path`` is relative
+       - ``<helpers.py dir>/<filename>`` when ``fallback_path`` is relative
+       - ``<project root>/pynat/<filename>`` when ``fallback_path`` is relative
 
     Returns:
         The API key string when found, otherwise ``None``.
@@ -300,7 +292,7 @@ def load_api_key(fallback_path: str = 'pyinaturalistkey.pkd') -> Union[str, None
         callers can decide whether to proceed or surface an error.
     """
     # 1) environment
-    for name in ('INAT_API_KEY', 'PYINAT_API_KEY', 'INAT_KEY'):
+    for name in ('INAT_TOKEN', 'INAT_API_KEY', 'PYINAT_API_KEY', 'INAT_KEY'):
         val = os.environ.get(name)
         if val:
             return val
@@ -320,12 +312,30 @@ def load_api_key(fallback_path: str = 'pyinaturalistkey.pkd') -> Union[str, None
             pass
 
     # 3) fallback dill file
-    try:
-        with open(fallback_path, 'rb') as f:
-            return dill.load(f)
-    except (OSError, EOFError, pickle.UnpicklingError) as e:
-        logger.debug('Could not load API key from %s: %s', fallback_path, e)
-        return None
+    candidates = [fallback_path]
+    if not os.path.isabs(fallback_path):
+        filename = os.path.basename(fallback_path)
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(module_dir)
+        candidates.extend([
+            os.path.join(os.getcwd(), filename),
+            os.path.join(module_dir, filename),
+            os.path.join(project_root, 'pynat', filename),
+        ])
+
+    seen_paths = set()
+    for path in candidates:
+        abs_path = os.path.abspath(path)
+        if abs_path in seen_paths:
+            continue
+        seen_paths.add(abs_path)
+        try:
+            with open(abs_path, 'rb') as f:
+                return dill.load(f)
+        except (OSError, EOFError, pickle.UnpicklingError) as e:
+            logger.debug('Could not load API key from %s: %s', abs_path, e)
+
+    return None
 
 ## (import-time API key loading removed; use `load_api_key()` at runtime)
 
@@ -439,11 +449,14 @@ def get_inat_session(token: Optional[str] = None,
                      expire_seconds: int = 24 * 3600) -> requests.Session:
     """Create a requests session configured for iNaturalist.
 
-    Reads `INAT_TOKEN` from the environment if `token` is not provided.
+    Uses explicit ``token`` first, then environment variables, then
+    :func:`load_api_key` as a final fallback.
     Installs `requests_cache` if available and `use_cache` is True.
     Sets the appropriate Authorization header when a token is present.
     """
     token = token or os.environ.get('INAT_TOKEN') or os.environ.get('INAT_API_KEY') or os.environ.get('PYINAT_API_KEY') or os.environ.get('INAT_KEY')
+    if not token:
+        token = load_api_key()
 
     if use_cache:
         try:
@@ -841,3 +854,363 @@ def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = N
     if len(res) > 499:
         logger.warning('Too many results; normalization may be incomplete')
     return res[['count', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url']].head(limit)
+
+
+def _compute_location_from_values(mode: str,
+                                  place_id_value: Optional[int],
+                                  lat_value: Optional[float],
+                                  lon_value: Optional[float],
+                                  radius_value: Optional[float]) -> dict[str, Any]:
+    if mode == 'place':
+        if not place_id_value:
+            raise ValueError('Please provide a valid Place ID.')
+        return {'places': [int(place_id_value)]}
+
+    coords = (lat_value, lon_value, radius_value)
+    if any(v is None for v in coords):
+        raise ValueError('Latitude, longitude, and radius are required for coordinate mode.')
+    return {'loc': (float(lat_value), float(lon_value), float(radius_value))}
+
+
+def _nativity_value(mode: str, nativity_id_value: Optional[int]) -> Union[str, int, None]:
+    if mode == 'auto':
+        return 'auto'
+    if mode == 'none':
+        return None
+    return int(nativity_id_value) if nativity_id_value is not None else 'auto'
+
+
+def _run_coming_soon_query(kind_value: str,
+                           location_kwargs: dict[str, Any],
+                           norm_value: Optional[str],
+                           limit_value: int,
+                           per_page_value: int,
+                           max_pages_value: int,
+                           fetch_images_value: bool,
+                           use_cache_value: bool,
+                           lineage_filter_value: str,
+                           nativity_value: Union[str, int, None],
+                           token: Optional[str] = None,
+                           session: Optional[requests.Session] = None) -> pd.DataFrame:
+    norm_arg = None if norm_value in [None, 'none'] else norm_value
+    return coming_soon(
+        kind=kind_value,
+        **location_kwargs,
+        norm=norm_arg,
+        limit=int(limit_value),
+        per_page=int(per_page_value),
+        max_pages=int(max_pages_value),
+        fetch_images=bool(fetch_images_value),
+        use_cache=bool(use_cache_value),
+        lineage_filter=lineage_filter_value,
+        nativity_place_id=nativity_value,
+        token=token,
+        session=session,
+    )
+
+
+def _lookup_place_name(session: Optional[requests.Session], place_id: Optional[int]) -> Optional[str]:
+    if place_id is None:
+        return None
+    try:
+        pid = int(place_id)
+    except (TypeError, ValueError):
+        return None
+
+    endpoint = f'https://api.inaturalist.org/v1/places/{pid}'
+    session_to_use = session or requests.Session()
+    try:
+        response = session_to_use.get(endpoint, timeout=12)
+        response.raise_for_status()
+        results = response.json().get('results', [])
+        if not results:
+            return None
+        place = results[0] if isinstance(results[0], dict) else {}
+        place_name = place.get('display_name') or place.get('name')
+        if isinstance(place_name, str) and place_name.strip():
+            return place_name.strip()
+    except Exception as e:
+        logger.debug('Could not resolve place name for place_id=%s: %s', place_id, e)
+    return None
+
+
+def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
+                         use_widgets: Optional[bool] = None,
+                         token: Optional[str] = None,
+                         session: Optional[requests.Session] = None) -> dict[str, Any]:
+    """Render a compact notebook UI and run :func:`coming_soon` with sane defaults.
+
+    This helper centralizes notebook orchestration so users can run one cell
+    to launch controls and one click to execute the query.
+
+    Parameters
+    ----------
+    defaults:
+        Optional overrides for control defaults. Supported keys include:
+        ``kind``, ``place_mode``, ``place_id``, ``lat``, ``lon``, ``radius_km``,
+        ``norm``, ``lineage_filter``, ``nativity_place_mode``,
+        ``nativity_place_id``, ``limit``, ``fetch_images``, ``per_page``,
+        ``max_pages``, ``use_cache``.
+    use_widgets:
+        Force widget mode on/off. If ``None``, auto-detects availability.
+    token, session:
+        Optional iNaturalist auth/session overrides passed through to query calls.
+
+    Returns
+    -------
+    dict
+        State dictionary with at least ``mode`` and ``res`` entries.
+    """
+
+    if not HAS_IPYTHON_DISPLAY:
+        raise RuntimeError('IPython display is not available in this environment.')
+
+    cfg = {
+        'kind': 'flowers',
+        'place_mode': 'place',
+        'place_id': 160915,
+        'lat': 37.66933,
+        'lon': -77.81001,
+        'radius_km': 42.0,
+        'norm': 'time',
+        'lineage_filter': 'native_endemic',
+        'nativity_place_mode': 'auto',
+        'nativity_place_id': 1297,
+        'limit': 7,
+        'fetch_images': True,
+        'per_page': 25,
+        'max_pages': 2,
+        'use_cache': True,
+    }
+    if defaults:
+        cfg.update(defaults)
+
+    env_token_present = bool(os.getenv('INAT_TOKEN') or os.getenv('INAT_API_KEY') or os.getenv('PYINAT_API_KEY') or os.getenv('INAT_KEY'))
+    loaded_key = load_api_key()
+    print(f'Env token set: {env_token_present}')
+    print(f'Credential available (env/keyring/file): {bool(loaded_key)}')
+
+    kind_options = [
+        'any', 'plants', 'flowers', 'fruits', 'mushrooms',
+        'animals', 'wugs', 'fish', 'herps', 'birds', 'mammals',
+        'butterflies', 'caterpillars',
+    ]
+    norm_options = ['none', 'time', 'place', 'overall']
+    lineage_options = ['any', 'native_endemic', 'introduced']
+
+    state: dict[str, Any] = {'mode': None, 'res': None}
+
+    if use_widgets is None:
+        try:
+            import ipywidgets as widgets
+            widgets_available = True
+        except Exception:
+            widgets = None
+            widgets_available = False
+    elif use_widgets:
+        import ipywidgets as widgets
+        widgets_available = True
+    else:
+        widgets = None
+        widgets_available = False
+
+    if widgets_available:
+        place_name_cache: dict[int, Optional[str]] = {}
+
+        def _cached_place_name(place_id: Optional[int]) -> Optional[str]:
+            if place_id is None:
+                return None
+            try:
+                pid = int(place_id)
+            except (TypeError, ValueError):
+                return None
+            if pid not in place_name_cache:
+                place_name_cache[pid] = _lookup_place_name(session=session, place_id=pid)
+            return place_name_cache[pid]
+
+        kind_w = widgets.Dropdown(options=kind_options, value=cfg['kind'], description='Kind:')
+        place_mode_w = widgets.Dropdown(
+            options=[('Use Place ID', 'place'), ('Use Coordinates', 'coords')],
+            value=cfg['place_mode'],
+            description='Location:',
+        )
+        place_id_w = widgets.IntText(value=int(cfg['place_id']), description='Place ID:')
+        place_id_name_w = widgets.HTML(value='')
+        lat_w = widgets.FloatText(value=float(cfg['lat']), description='Lat:')
+        lon_w = widgets.FloatText(value=float(cfg['lon']), description='Lon:')
+        radius_w = widgets.FloatText(value=float(cfg['radius_km']), description='Radius km:')
+        limit_w = widgets.BoundedIntText(value=int(cfg['limit']), min=1, max=200, description='Limit:')
+        fetch_images_w = widgets.Checkbox(value=bool(cfg['fetch_images']), description='Fetch images')
+
+        norm_w = widgets.Dropdown(options=norm_options, value=cfg['norm'], description='Norm:')
+        lineage_filter_w = widgets.Dropdown(options=lineage_options, value=cfg['lineage_filter'], description='Lineage:')
+        nativity_place_mode_w = widgets.Dropdown(
+            options=[('Auto', 'auto'), ('Use Place ID', 'id'), ('None', 'none')],
+            value=cfg['nativity_place_mode'],
+            description='Reference Loc:',
+        )
+        nativity_place_id_w = widgets.IntText(value=int(cfg['nativity_place_id']), description='Nativity ID:')
+        nativity_place_name_w = widgets.HTML(value='')
+        per_page_w = widgets.BoundedIntText(value=int(cfg['per_page']), min=10, max=200, description='Per page:')
+        max_pages_w = widgets.BoundedIntText(value=int(cfg['max_pages']), min=1, max=8, description='Pages:')
+        use_cache_w = widgets.Checkbox(value=bool(cfg['use_cache']), description='Use cache')
+
+        place_id_box = widgets.VBox([place_id_w, place_id_name_w])
+        coords_box = widgets.VBox([lat_w, lon_w, radius_w])
+        nativity_id_box = widgets.VBox([nativity_place_id_w, nativity_place_name_w])
+
+        def _refresh_place_labels(*_):
+            place_name = _cached_place_name(place_id_w.value)
+            if place_name:
+                place_id_name_w.value = f'<span style="opacity:0.8;">(Place: {place_name})</span>'
+            else:
+                place_id_name_w.value = ''
+
+            nativity_name = _cached_place_name(nativity_place_id_w.value)
+            if nativity_name:
+                nativity_place_name_w.value = f'<span style="opacity:0.8;">(Reference: {nativity_name})</span>'
+            else:
+                nativity_place_name_w.value = ''
+
+        def _update_location_visibility(*_):
+            using_place = place_mode_w.value == 'place'
+            place_id_box.layout.display = '' if using_place else 'none'
+            coords_box.layout.display = 'none' if using_place else ''
+
+        def _update_nativity_visibility(*_):
+            needs_nativity_id = nativity_place_mode_w.value == 'id'
+            nativity_id_box.layout.display = '' if needs_nativity_id else 'none'
+
+        place_id_w.observe(_refresh_place_labels, names='value')
+        nativity_place_id_w.observe(_refresh_place_labels, names='value')
+        place_mode_w.observe(_update_location_visibility, names='value')
+        nativity_place_mode_w.observe(_update_nativity_visibility, names='value')
+        _update_location_visibility()
+        _update_nativity_visibility()
+        _refresh_place_labels()
+
+        basic_box = widgets.VBox([
+            widgets.HTML('<h4>Start here (basic)</h4>'),
+            kind_w,
+            place_mode_w,
+            place_id_box,
+            coords_box,
+            norm_w,
+            lineage_filter_w,
+            nativity_place_mode_w,
+            fetch_images_w,
+        ])
+        advanced_box = widgets.VBox([
+            widgets.HTML('<h4>Advanced (optional)</h4>'),
+            limit_w,
+            nativity_id_box,
+            per_page_w,
+            max_pages_w,
+            use_cache_w,
+        ])
+
+        run_button = widgets.Button(description='Run Query', button_style='success')
+        out = widgets.Output()
+
+        def _on_run(_):
+            out.clear_output()
+            with out:
+                try:
+                    location_kwargs = _compute_location_from_values(
+                        place_mode_w.value,
+                        place_id_w.value,
+                        lat_w.value,
+                        lon_w.value,
+                        radius_w.value,
+                    )
+                    nativity_value = _nativity_value(nativity_place_mode_w.value, nativity_place_id_w.value)
+                    print('Running query...')
+                    res = _run_coming_soon_query(
+                        kind_w.value,
+                        location_kwargs,
+                        norm_w.value,
+                        limit_w.value,
+                        per_page_w.value,
+                        max_pages_w.value,
+                        fetch_images_w.value,
+                        use_cache_w.value,
+                        lineage_filter_w.value,
+                        nativity_value,
+                        token=token,
+                        session=session,
+                    )
+                    state['res'] = res
+                    if getattr(res, 'empty', True):
+                        if Markdown is not None:
+                            display(Markdown('No results found. Try a larger radius or different group.'))
+                        else:
+                            print('No results found. Try a larger radius or different group.')
+                        return
+                    if Markdown is not None:
+                        display(Markdown(f'### Found {len(res)} taxa'))
+                    show_cols = ['count', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url']
+                    safe_cols = [c for c in show_cols if c in res.columns]
+                    display(res[safe_cols].head(int(limit_w.value)))
+                except Exception as exc:
+                    if Markdown is not None:
+                        display(Markdown(f'**Could not run query:** {exc}'))
+                        display(Markdown('Tips: verify Place ID or coordinates, then try fewer pages (1-2).'))
+                    else:
+                        print(f'Could not run query: {exc}')
+
+        run_button.on_click(_on_run)
+        state['mode'] = 'widgets'
+        state['run_button'] = run_button
+        state['output'] = out
+        display(basic_box, advanced_box)
+        if Markdown is not None:
+            display(Markdown('Click **Run Query** to execute.'))
+        display(run_button, out)
+        return state
+
+    if Markdown is not None:
+        display(Markdown('`ipywidgets` is unavailable; running in fallback text mode.'))
+
+    try:
+        location_kwargs = _compute_location_from_values(
+            str(cfg['place_mode']),
+            int(cfg['place_id']) if cfg.get('place_id') is not None else None,
+            float(cfg['lat']) if cfg.get('lat') is not None else None,
+            float(cfg['lon']) if cfg.get('lon') is not None else None,
+            float(cfg['radius_km']) if cfg.get('radius_km') is not None else None,
+        )
+        nativity_value = _nativity_value(str(cfg['nativity_place_mode']), cfg.get('nativity_place_id'))
+        res = _run_coming_soon_query(
+            str(cfg['kind']),
+            location_kwargs,
+            str(cfg['norm']),
+            int(cfg['limit']),
+            int(cfg['per_page']),
+            int(cfg['max_pages']),
+            bool(cfg['fetch_images']),
+            bool(cfg['use_cache']),
+            str(cfg['lineage_filter']),
+            nativity_value,
+            token=token,
+            session=session,
+        )
+        state['mode'] = 'fallback'
+        state['res'] = res
+        if getattr(res, 'empty', True):
+            if Markdown is not None:
+                display(Markdown('No results found. Try a larger radius or different group.'))
+            else:
+                print('No results found. Try a larger radius or different group.')
+        else:
+            show_cols = ['count', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url']
+            safe_cols = [c for c in show_cols if c in res.columns]
+            display(res[safe_cols].head(int(cfg['limit'])))
+    except Exception as exc:
+        state['mode'] = 'fallback'
+        state['res'] = None
+        if Markdown is not None:
+            display(Markdown(f'**Could not run query:** {exc}'))
+        else:
+            print(f'Could not run query: {exc}')
+
+    return state
