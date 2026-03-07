@@ -1,4 +1,4 @@
--r requirements.txt
+-r ../requirements.txt
 ipywidgets>=8.1,<9
 voila>=0.5,<1
 jupyterlab>=4,<5
