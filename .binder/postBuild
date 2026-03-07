@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -e
+
+# Enable widgets in classic notebook (safe no-op in JupyterLab-only flows)
+jupyter nbextension enable --py --sys-prefix widgetsnbextension || true

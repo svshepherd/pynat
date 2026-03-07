@@ -3,12 +3,14 @@
 ## binder/public usage
 
 - Binder (JupyterLab):
-	https://mybinder.org/v2/gh/svshepherd/pynat/HEAD?urlpath=lab/tree/pynat/coming_soon_near_you.ipynb
+	https://mybinder.org/v2/gh/svshepherd/pynat/main?urlpath=lab/tree/coming_soon_near_you.ipynb
+- Binder (fallback, classic open):
+	https://mybinder.org/v2/gh/svshepherd/pynat/main?filepath=coming_soon_near_you.ipynb
 - Voila app view (code hidden):
-	https://mybinder.org/v2/gh/svshepherd/pynat/HEAD?urlpath=voila/render/pynat/coming_soon_near_you.ipynb
+	https://mybinder.org/v2/gh/svshepherd/pynat/main?urlpath=voila/render/coming_soon_near_you.ipynb
 
 Tips:
-- For repeatable public demos, replace `HEAD` in the URLs with a release tag (example: `v0.1.0`).
+- For repeatable public demos, replace `main` in the URLs with a release tag (example: `v0.1.0`).
 - Binder cold starts can take a few minutes.
 - `coming_soon()` and `get_park_data()` support a REST fallback when `pyinaturalist` is unavailable.
 
