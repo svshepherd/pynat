@@ -2,24 +2,38 @@
 
 ## binder/public usage
 
-- View in Binder here: https://mybinder.org/v2/gh/svshepherd/pynat/HEAD
-- Select "coming soon near you" notebook
-- In Binder, either run anonymously or set a session-only token:
+- Binder (JupyterLab):
+	https://mybinder.org/v2/gh/svshepherd/pynat/HEAD?urlpath=lab/tree/pynat/coming_soon_near_you.ipynb
+- Voila app view (code hidden):
+	https://mybinder.org/v2/gh/svshepherd/pynat/HEAD?urlpath=voila/render/pynat/coming_soon_near_you.ipynb
+
+Tips:
+- For repeatable public demos, replace `HEAD` in the URLs with a release tag (example: `v0.1.0`).
+- Binder cold starts can take a few minutes.
+- `coming_soon()` and `get_park_data()` support a REST fallback when `pyinaturalist` is unavailable.
+
+### first run in binder
+
+1. Open the Binder JupyterLab link above.
+2. Run all cells in `coming_soon_near_you.ipynb`.
+3. Use the basic controls first (kind, location, norm, lineage).
+4. Keep advanced settings small for faster public sessions (`per_page=25`, `max_pages=1-2`, `fetch_images=False`).
+
+Optional session-only token (never commit secrets):
 
 ```python
 import os, getpass
 token = getpass.getpass('Paste iNaturalist token (optional): ').strip()
 if token:
-	os.environ['INAT_TOKEN'] = token
+    os.environ['INAT_TOKEN'] = token
 ```
 
-- `coming_soon()` and `get_park_data()` now support optional REST fallback when `pyinaturalist` is unavailable.
-- For low traffic / faster runs in Binder, use smaller pages and fast mode:
+Quick low-traffic examples:
 
 ```python
 from pynat.helpers import coming_soon, get_park_data
 
-coming_soon('birds', loc=(37.6669, -77.8883, 25), fast=True, per_page=25, max_pages=2, fetch_images=False)
+coming_soon('birds', loc=(37.6669, -77.8883, 25), per_page=25, max_pages=2, fetch_images=False)
 get_park_data((37.6669, -77.8883, 5), 'plants', limit=20, per_page=25, max_pages=2)
 ```
 

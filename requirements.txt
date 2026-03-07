@@ -6,3 +6,5 @@ matplotlib
 ipyplot
 dill
 pyinaturalist
+requests-ratelimiter<0.9
+jupyter
