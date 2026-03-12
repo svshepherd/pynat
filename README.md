@@ -1,5 +1,13 @@
 # work in progress
 
+## environment setup
+
+Run these inside this repository folder.
+
+- `uv venv`
+- `uv sync`
+- `uv run pytest tests`
+
 ## binder/public usage
 
 - Binder (JupyterLab):

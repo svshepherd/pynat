@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pynat"
+version = "0.1.0"
+description = "Small iNaturalist analysis utilities"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "dill>=0.3.8",
+  "ipyplot>=1.1",
+  "jupyter>=1.0",
+  "matplotlib>=3.9",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "plotly>=5.24",
+  "pyinaturalist>=0.20",
+  "requests>=2.32",
+  "requests-cache>=1.2",
+  "requests-ratelimiter<0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.11",
+]
+
+[tool.uv]
+package = false

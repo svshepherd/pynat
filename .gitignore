@@ -1,1 +1,17 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+
+# Notebook noise
+.ipynb_checkpoints/
+
+# Local secrets and data
 *.pkd
+*.sqlite
