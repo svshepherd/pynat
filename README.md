@@ -69,13 +69,13 @@ tbd
 ## confidence_manimal
 tool to score ID reliability per user | observation
 
-### architecture notes (scoped to pynat/con_man.py only)
+### architecture notes (scoped to pynat/reliability.py only)
 
 These notes describe only the proposal-level reliability analysis implemented
-in pynat/con_man.py. They do not describe architecture for the rest of this
+in pynat/reliability.py. They do not describe architecture for the rest of this
 repository.
 
-Pipeline stages for pynat/con_man.py:
+Pipeline stages for pynat/reliability.py:
 
 1. Ingest (online): download the minimum raw entities needed to reconstruct
 	 identification timelines for one user.
@@ -83,7 +83,7 @@ Pipeline stages for pynat/con_man.py:
 	 then compute confirmation and correctness outcomes with rank-aware rules.
 3. Summarize (offline): aggregate per-species and per-rank reliability metrics.
 
-Core concepts in pynat/con_man.py:
+Core concepts in pynat/reliability.py:
 
 - A proposal is each time a user changes taxon on an observation.
 - Confirmations are later IDs by other users that meet a boundary defined by
@@ -91,7 +91,7 @@ Core concepts in pynat/con_man.py:
 - Correctness depth compares proposal taxon versus final community taxon using
 	the ladder: species, genus, family, higher, wrong, or no_ct.
 
-Status ladder in pynat/con_man.py:
+Status ladder in pynat/reliability.py:
 
 - vindicated
 - undecided_support
@@ -102,7 +102,7 @@ Status ladder in pynat/con_man.py:
 Status assignment uses ordered precedence in the implementation and is
 intentional for this file-specific reliability logic.
 
-Ingest policy in pynat/con_man.py:
+Ingest policy in pynat/reliability.py:
 
 - Default ingest mode is incremental.
 - Incremental mode still refreshes the user's full identification list, then
@@ -111,7 +111,7 @@ Ingest policy in pynat/con_man.py:
 - First-run or incomplete-cache scenarios automatically fall back to full ingest.
 - Full ingest remains available for forced cache rebuilds.
 
-API etiquette in pynat/con_man.py:
+API etiquette in pynat/reliability.py:
 
 - Requests are paced and retried with exponential backoff for transient errors.
 - `Retry-After` headers are honored when provided by the API.

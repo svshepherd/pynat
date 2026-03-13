@@ -21,6 +21,7 @@ dependencies = [
   "requests>=2.32",
   "requests-cache>=1.2",
   "requests-ratelimiter<0.9",
+  "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]

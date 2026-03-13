@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import pandas as pd
 
-import con_man as cm
+import reliability as cm
 
 
 def test_summarize_from_proposals_basic_rates():
@@ -54,6 +54,8 @@ def test_summarize_from_proposals_basic_rates():
     assert row['n_vindicated'] == 1
     assert row['n_overruled'] == 1
     assert row['n_vindicated_rate'] == 0.5
+    for col in [c for c in sp.columns if c.endswith('_rate')]:
+        assert pd.api.types.is_numeric_dtype(sp[col])
 
     genus_row = rk[rk['taxon_rank'] == 'genus'].iloc[0]
     assert genus_row['undecided_rate'] == 1.0
