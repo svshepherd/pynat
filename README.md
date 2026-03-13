@@ -1,118 +1,132 @@
-# work in progress
+# pynat
 
-## environment setup
+Small iNaturalist helper workflows for exploration and reliability analysis.
 
-Run these inside this repository folder.
+This repository currently has two main tracks:
+- Observation discovery utilities in `helpers.py` (for example, coming-soon seasonal species queries).
+- Identification reliability analysis in `reliability.py` (proposal-level outcomes and taxon-level summaries).
 
-- `uv venv`
-- `uv sync`
-- `uv run pytest tests`
+## Quickstart (local development)
 
-## binder/public usage
+Run these from the repository root:
 
-Public binder notebook scope (current): only coming_soon_near_you.ipynb is
-treated as the public entrypoint.
+```bash
+uv venv
+uv sync --extra dev
+uv run --extra dev pytest -q
+```
 
-Exploratory notebooks are kept under notebooks/exploratory/:
-- notebooks/exploratory/inaturalismus.ipynb
-- notebooks/exploratory/parks.ipynb
+Notes:
+- The project uses `uv` for environment and dependency management.
+- `pytest` lives in the `dev` extra, so include `--extra dev` for test commands.
+
+## Public notebook entrypoint (Binder)
+
+Public Binder scope: `coming_soon_near_you.ipynb`.
+
+Exploratory notebooks are under `notebooks/exploratory/` and are not treated as stable public entrypoints.
 
 - Binder (JupyterLab):
 	https://mybinder.org/v2/gh/svshepherd/pynat/main?urlpath=lab/tree/coming_soon_near_you.ipynb
-- Binder (fallback, classic open):
+- Binder (classic fallback):
 	https://mybinder.org/v2/gh/svshepherd/pynat/main?filepath=coming_soon_near_you.ipynb
-- Voila app view (code hidden):
+- Voila render (code hidden):
 	https://mybinder.org/v2/gh/svshepherd/pynat/main?urlpath=voila/render/coming_soon_near_you.ipynb
 
-Tips:
-- For repeatable public demos, replace `main` in the URLs with a release tag (example: `v0.1.0`).
-- Binder cold starts can take a few minutes.
-- `coming_soon()` and `get_park_data()` support a REST fallback when `pyinaturalist` is unavailable.
+Binder tips:
+- Cold starts can take a few minutes.
+- For reproducible demos, replace `main` in URLs with a release tag.
+- Start with low-traffic settings (`per_page=25`, `max_pages=2`, `fetch_images=False`).
 
-### first run in binder
+## Authentication and secrets
 
-1. Open the Binder JupyterLab link above.
-2. Run all cells in `coming_soon_near_you.ipynb`.
-3. Use the basic controls first (kind, location, norm, lineage).
-4. Keep advanced settings small for faster public sessions (`per_page=25`, `max_pages=1-2`, `fetch_images=False`).
+Never commit API tokens or key files.
 
-Optional session-only token (never commit secrets):
+Runtime key lookup in `helpers.load_api_key()` uses this order:
+1. Environment variables (`INAT_TOKEN`, `INAT_API_KEY`, `PYINAT_API_KEY`, `INAT_KEY`)
+2. System keyring (if installed)
+3. Legacy dill fallback file (`pyinaturalistkey.pkd`)
+
+Session-only token example:
 
 ```python
 import os, getpass
-token = getpass.getpass('Paste iNaturalist token (optional): ').strip()
+token = getpass.getpass("Paste iNaturalist token (optional): ").strip()
 if token:
-    os.environ['INAT_TOKEN'] = token
+    os.environ["INAT_TOKEN"] = token
 ```
 
-Quick low-traffic examples:
+## Core helper workflows
+
+Implemented in `helpers.py`:
+- `coming_soon(...)`: seasonal/common taxa with optional normalization and nativity filtering.
+- `get_park_data(...)`: park-centered species ranking by relative frequency.
+- `coming_soon_notebook(...)`: notebook UI wrapper used by the public notebook.
+- `get_mine(...)`: fetch and print recent observations for a user.
+
+Quick example:
 
 ```python
-from pynat.helpers import coming_soon, get_park_data
+from helpers import coming_soon, get_park_data
 
-coming_soon('birds', loc=(37.6669, -77.8883, 25), per_page=25, max_pages=2, fetch_images=False)
-get_park_data((37.6669, -77.8883, 5), 'plants', limit=20, per_page=25, max_pages=2)
+df = coming_soon(
+    "birds",
+    loc=(37.6669, -77.8883, 25),
+    per_page=25,
+    max_pages=2,
+    fetch_images=False,
+)
+
+parks = get_park_data(
+    (37.6669, -77.8883, 5),
+    "plants",
+    limit=20,
+    per_page=25,
+    max_pages=2,
+)
 ```
 
-## tools for checking local observations
+Fallback behavior:
+- When `pyinaturalist` is unavailable, helper queries fall back to direct REST calls.
+- Fallback calls are bounded by `per_page` and `max_pages` to avoid unbounded network fetches.
 
-"coming soon" by iconic taxon
+## Reliability analysis (`reliability.py`)
 
-## tools for reviewing IDs
+`reliability.py` contains an `Analyzer` class for proposal-level reliability workflows.
 
-standardizes file names for use with other services e.g. flickr
+High-level stages:
+1. Ingest (online): cache identification timelines and observation shells.
+2. Build proposals (offline): derive proposal events and outcomes.
+3. Summarize (offline): species/rank reliability metrics.
 
-## tools for comparing obs/ident trends
+Ingest policy:
+- Default mode is incremental.
+- Incremental mode refreshes user IDs and only refetches changed/new observation timelines.
+- Missing cache files trigger automatic fallback to full ingest.
 
-tbd
+Minimal programmatic example:
 
-## confidence_manimal
-tool to score ID reliability per user | observation
+```python
+from reliability import Analyzer
 
-### architecture notes (scoped to pynat/reliability.py only)
+an = Analyzer()
+out = an.assess_taxon(
+    user_login="your_login",
+    taxon_id=130953,
+    start="2024-01-01",
+    end="2025-12-31",
+    print_report=False,
+)
 
-These notes describe only the proposal-level reliability analysis implemented
-in pynat/reliability.py. They do not describe architecture for the rest of this
-repository.
+out["taxon_reliability"].head()
+```
 
-Pipeline stages for pynat/reliability.py:
+## Testing
 
-1. Ingest (online): download the minimum raw entities needed to reconstruct
-	 identification timelines for one user.
-2. Build proposals (offline): derive user proposal events from timeline data,
-	 then compute confirmation and correctness outcomes with rank-aware rules.
-3. Summarize (offline): aggregate per-species and per-rank reliability metrics.
+Run the test suite with:
 
-Core concepts in pynat/reliability.py:
+```bash
+uv run --extra dev pytest -q
+```
 
-- A proposal is each time a user changes taxon on an observation.
-- Confirmations are later IDs by other users that meet a boundary defined by
-	proposal rank and disagreement flag.
-- Correctness depth compares proposal taxon versus final community taxon using
-	the ladder: species, genus, family, higher, wrong, or no_ct.
-
-Status ladder in pynat/reliability.py:
-
-- vindicated
-- undecided_support
-- overruled
-- withdrawn
-- unknown
-
-Status assignment uses ordered precedence in the implementation and is
-intentional for this file-specific reliability logic.
-
-Ingest policy in pynat/reliability.py:
-
-- Default ingest mode is incremental.
-- Incremental mode still refreshes the user's full identification list, then
-	only refetches observation timelines for observations that are new or whose
-	observation `updated_at` changed since the last cache snapshot.
-- First-run or incomplete-cache scenarios automatically fall back to full ingest.
-- Full ingest remains available for forced cache rebuilds.
-
-API etiquette in pynat/reliability.py:
-
-- Requests are paced and retried with exponential backoff for transient errors.
-- `Retry-After` headers are honored when provided by the API.
-- This keeps steady refresh workflows resilient while reducing pressure on the API.
+Current tests cover helper utilities and core reliability behavior paths.

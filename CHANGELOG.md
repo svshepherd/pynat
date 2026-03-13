@@ -16,4 +16,5 @@
 - Various crash scenarios when API returns empty/malformed results.
 
 ### Notes
-- All changes are covered by unit tests (3 passing tests). See `requirements-dev.txt` for test dependencies.
+- Test suite is run via `uv` dev extras (for example: `uv run --extra dev pytest -q`).
+- Current local baseline: 27 passing tests.
