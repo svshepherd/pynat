@@ -1,8 +1,4 @@
 import os
-import sys
-
-# Ensure package root is importable when tests run from pynat/tests.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import pandas as pd
 
