@@ -15,3 +15,7 @@ __pycache__/
 # Local secrets and data
 *.pkd
 *.sqlite
+
+# Generated analysis outputs
+data/
+.cache/
