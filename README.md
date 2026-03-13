@@ -10,6 +10,13 @@ Run these inside this repository folder.
 
 ## binder/public usage
 
+Public binder notebook scope (current): only coming_soon_near_you.ipynb is
+treated as the public entrypoint.
+
+Exploratory notebooks are kept under notebooks/exploratory/:
+- notebooks/exploratory/inaturalismus.ipynb
+- notebooks/exploratory/parks.ipynb
+
 - Binder (JupyterLab):
 	https://mybinder.org/v2/gh/svshepherd/pynat/main?urlpath=lab/tree/coming_soon_near_you.ipynb
 - Binder (fallback, classic open):
@@ -61,3 +68,51 @@ tbd
 
 ## confidence_manimal
 tool to score ID reliability per user | observation
+
+### architecture notes (scoped to pynat/con_man.py only)
+
+These notes describe only the proposal-level reliability analysis implemented
+in pynat/con_man.py. They do not describe architecture for the rest of this
+repository.
+
+Pipeline stages for pynat/con_man.py:
+
+1. Ingest (online): download the minimum raw entities needed to reconstruct
+	 identification timelines for one user.
+2. Build proposals (offline): derive user proposal events from timeline data,
+	 then compute confirmation and correctness outcomes with rank-aware rules.
+3. Summarize (offline): aggregate per-species and per-rank reliability metrics.
+
+Core concepts in pynat/con_man.py:
+
+- A proposal is each time a user changes taxon on an observation.
+- Confirmations are later IDs by other users that meet a boundary defined by
+	proposal rank and disagreement flag.
+- Correctness depth compares proposal taxon versus final community taxon using
+	the ladder: species, genus, family, higher, wrong, or no_ct.
+
+Status ladder in pynat/con_man.py:
+
+- vindicated
+- undecided_support
+- overruled
+- withdrawn
+- unknown
+
+Status assignment uses ordered precedence in the implementation and is
+intentional for this file-specific reliability logic.
+
+Ingest policy in pynat/con_man.py:
+
+- Default ingest mode is incremental.
+- Incremental mode still refreshes the user's full identification list, then
+	only refetches observation timelines for observations that are new or whose
+	observation `updated_at` changed since the last cache snapshot.
+- First-run or incomplete-cache scenarios automatically fall back to full ingest.
+- Full ingest remains available for forced cache rebuilds.
+
+API etiquette in pynat/con_man.py:
+
+- Requests are paced and retried with exponential backoff for transient errors.
+- `Retry-After` headers are honored when provided by the API.
+- This keeps steady refresh workflows resilient while reducing pressure on the API.
