@@ -11,7 +11,7 @@ Primary workflow
 3) Classify proposals as confirmed, disconfirmed, or unresolved.
 4) Report overlap depth and confirmed/disconfirmed ratios by taxonomic level.
 
-This file still contains legacy cache-backed ingest/summarize methods for
+This file still contains deprecated cache-backed ingest/summarize methods for
 backward compatibility, but the taxon-scoped assess path is the intended
 lightweight entrypoint.
 """
@@ -1379,11 +1379,11 @@ def parse_bbox(s: str) -> Tuple[float,float,float,float]:
 
 
 def main():
-    """CLI entrypoint for lean taxon assessment and legacy cache workflows."""
-    ap = argparse.ArgumentParser(description="iNat user+taxon reliability analyzer")
+    """CLI entrypoint for primary taxon assessment and deprecated cache workflows."""
+    ap = argparse.ArgumentParser(description="iNat user+taxon reliability analyzer (assess-taxon is primary)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    ap_ing = sub.add_parser("ingest", help="Download and cache data for a user")
+    ap_ing = sub.add_parser("ingest", help="DEPRECATED: download and cache data for a user")
     ap_ing.add_argument("--user", required=True, help="iNat login (e.g., schizoform)")
     ap_ing.add_argument("--out", default=DEFAULT_CACHE_DIR, help="Cache/output directory")
     ap_ing.add_argument(
@@ -1393,7 +1393,7 @@ def main():
         help="Ingest strategy: incremental (default, first-run falls back to full) or full",
     )
 
-    ap_rep = sub.add_parser("ingest-report", help="Dry-run ingest workload report")
+    ap_rep = sub.add_parser("ingest-report", help="DEPRECATED: dry-run ingest workload report")
     ap_rep.add_argument("--user", required=True, help="iNat login")
     ap_rep.add_argument("--out", default=DEFAULT_CACHE_DIR, help="Cache/output directory")
     ap_rep.add_argument(
@@ -1403,7 +1403,7 @@ def main():
         help="Report strategy assumptions: incremental (default) or full",
     )
 
-    ap_sum = sub.add_parser("summarize", help="Build proposals and summaries from cache")
+    ap_sum = sub.add_parser("summarize", help="DEPRECATED: build proposals and summaries from cache")
     ap_sum.add_argument("--user", required=True, help="iNat login")
     ap_sum.add_argument("--out", default=DEFAULT_CACHE_DIR, help="Cache/output directory")
     ap_sum.add_argument("--start", help="Start date (YYYY-MM-DD)")

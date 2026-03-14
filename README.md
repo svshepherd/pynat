@@ -92,24 +92,22 @@ Fallback behavior:
 
 ## Reliability analysis (`reliability.py`)
 
-`reliability.py` contains an `Analyzer` class for proposal-level reliability workflows.
+`reliability.py` contains an `Analyzer` class for taxon-scoped reliability analysis.
 
-High-level stages:
-1. Ingest (online): cache identification timelines and observation shells.
-2. Build proposals (offline): derive proposal events and outcomes.
-3. Summarize (offline): species/rank reliability metrics.
+Primary workflow:
+- Use `Analyzer.assess_taxon(...)` (or CLI `assess-taxon`) for one user and one target taxon.
+- The method builds proposal outcomes and taxonomic overlap summaries in one pass.
 
-Ingest policy:
-- Default mode is incremental.
-- Incremental mode refreshes user IDs and only refetches changed/new observation timelines.
-- Missing cache files trigger automatic fallback to full ingest.
+Deprecated workflow:
+- Legacy cache-first `ingest`/`summarize` commands are deprecated and kept only for compatibility.
+- New usage should prefer taxon-scoped assessment.
 
 Minimal programmatic example:
 
 ```python
 from reliability import Analyzer
 
-an = Analyzer()
+an = Analyzer(cache_dir="data")
 out = an.assess_taxon(
     user_login="your_login",
     taxon_id=130953,
