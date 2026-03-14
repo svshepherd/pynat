@@ -188,6 +188,7 @@ class INatClient:
         taxon_id: int,
         start: Optional[str] = None,
         end: Optional[str] = None,
+        include_withdrawn: bool = True,
     ) -> Tuple[List[Dict], Dict[str, Any]]:
         """Fetch user identifications newest-first in a time window.
 
@@ -217,7 +218,7 @@ class INatClient:
             params = {
                 "user_id": user,
                 "taxon_id": int(taxon_id),
-                "current": "any",
+                "current": "any" if include_withdrawn else "true",
                 "order_by": "created_at",
                 "order": "desc",
                 "page": page,
@@ -933,6 +934,10 @@ class Analyzer:
 
                 prop_idx += 1
                 current_taxon = tid
+                taxon_name = r.get("taxon.name")
+                if not isinstance(taxon_name, str) or not taxon_name.strip():
+                    taxon_obj = self._taxon(tid)
+                    taxon_name = taxon_obj.name if taxon_obj else ""
                 prop = Proposal(
                     obs_id=int(obs_id),
                     proposer_user_id=int(r.get("user.id")) if not pd.isna(r.get("user.id")) else -1,
@@ -940,7 +945,7 @@ class Analyzer:
                     proposal_index=prop_idx,
                     proposed_at=str(r.get("_created_at_utc")),
                     taxon_id=tid,
-                    taxon_name=r.get("taxon.name") or "",
+                    taxon_name=taxon_name,
                     taxon_rank=r.get("taxon.rank") or "",
                     disagree=bool(r.get("disagreement")) if "disagreement" in r else None,
                     withdrawn=not bool(r.get("current")) if "current" in r else False,
@@ -1075,6 +1080,7 @@ class Analyzer:
         end: Optional[str] = None,
         place_ids: Optional[List[int]] = None,
         bbox: Optional[Tuple[float, float, float, float]] = None,
+        include_withdrawn: bool = True,
         print_report: bool = False,
     ) -> Dict[str, pd.DataFrame]:
         """Assess one user+taxon reliability with minimal API footprint.
@@ -1096,13 +1102,21 @@ class Analyzer:
             raise ValueError("taxon_id is required")
 
         target_taxon_id = int(taxon_id)
-        log(f"Fetching identifications for user {user_login} and taxon {target_taxon_id}…")
+        log(
+            f"[assess_taxon:scope] Fetching identifications for user '{user_login}' "
+            f"within taxon {target_taxon_id} (target + descendants)."
+        )
         my_ids, fetch_meta = self.client.user_identifications_windowed_best_effort(
             user=user_login,
             taxon_id=target_taxon_id,
             start=start,
             end=end,
+            include_withdrawn=include_withdrawn,
         )
+        fetch_meta = dict(fetch_meta)
+        fetch_meta["target_taxon_id"] = target_taxon_id
+        fetch_meta["target_scope"] = "target_plus_descendants"
+        fetch_meta["include_withdrawn"] = bool(include_withdrawn)
         if fetch_meta.get("warning"):
             log(fetch_meta["warning"])
         if not my_ids:
@@ -1125,7 +1139,34 @@ class Analyzer:
             }
 
         my_taxon = pd.to_numeric(df_my["taxon.id"], errors="coerce")
-        df_my_taxon = df_my[my_taxon == target_taxon_id].copy()
+        my_taxon_ids = sorted(set(my_taxon.dropna().astype(int).tolist()))
+        scope_taxa_ids = sorted(set(my_taxon_ids + [target_taxon_id]))
+        scope_taxa = self.client.taxa_by_ids(scope_taxa_ids) if scope_taxa_ids else []
+        scope_taxa_map: Dict[int, Taxon] = {t["id"]: Taxon.from_api(t) for t in scope_taxa if "id" in t}
+
+        target_scope_taxon = scope_taxa_map.get(target_taxon_id)
+        if target_scope_taxon:
+            fetch_meta["target_taxon_name"] = target_scope_taxon.name
+            fetch_meta["target_taxon_rank"] = target_scope_taxon.rank
+
+            def in_target_lineage(raw_tid: Any) -> bool:
+                if pd.isna(raw_tid):
+                    return False
+                tid = int(raw_tid)
+                t = scope_taxa_map.get(tid)
+                if not t:
+                    # If taxonomy lookup is missing, trust API taxon scoping.
+                    return True
+                return tid == target_taxon_id or target_taxon_id in set(t.ancestor_ids)
+
+            lineage_mask = my_taxon.map(in_target_lineage)
+        else:
+            # If target lineage lookup fails, avoid dropping API-scoped rows.
+            lineage_mask = my_taxon.notna()
+
+        df_my_taxon = df_my[lineage_mask.fillna(False)].copy()
+        fetch_meta["candidate_identification_count"] = int(len(df_my))
+        fetch_meta["lineage_filtered_identification_count"] = int(len(df_my_taxon))
         if df_my_taxon.empty:
             return {
                 "proposals": pd.DataFrame(),
@@ -1136,6 +1177,7 @@ class Analyzer:
             }
 
         obs_ids = sorted(df_my_taxon["observation.id"].dropna().astype(int).unique().tolist())
+        fetch_meta["observation_scope_count"] = int(len(obs_ids))
         if not obs_ids:
             return {
                 "proposals": pd.DataFrame(),
@@ -1145,7 +1187,11 @@ class Analyzer:
                 "analysis_meta": fetch_meta,
             }
 
-        log(f"Target taxon observation footprint: {len(obs_ids)}")
+        log(
+            f"[assess_taxon:scope] Retained {len(df_my_taxon)} proposals across {len(obs_ids)} "
+            f"observations for target lineage."
+        )
+        log("[assess_taxon:timeline] Fetching full identification timelines for scoped observations.")
         all_ids = self.client.identifications_for_observations(obs_ids)
         obs = self.client.observations_by_ids(obs_ids)
         df_all = pd.json_normalize(all_ids)
@@ -1160,11 +1206,17 @@ class Analyzer:
             all_taxon_ids = set(pd.concat(taxon_series, axis=0).dropna().astype(int).tolist())
         else:
             all_taxon_ids = set()
+        all_taxon_ids.update(scope_taxa_map.keys())
         all_taxon_ids.add(target_taxon_id)
 
         taxa = self.client.taxa_by_ids(sorted(all_taxon_ids)) if all_taxon_ids else []
         self._taxa_cache = {t["id"]: Taxon.from_api(t) for t in taxa if "id" in t}
+        target_taxon = self._taxon(target_taxon_id)
+        if target_taxon:
+            fetch_meta["target_taxon_name"] = target_taxon.name
+            fetch_meta["target_taxon_rank"] = target_taxon.rank
 
+        log("[assess_taxon:build] Building proposal outcomes from observation timelines.")
         df_props = self._build_proposals_from_frames(
             user_login=user_login,
             df_all=df_all,
@@ -1174,6 +1226,7 @@ class Analyzer:
             place_ids=place_ids,
             bbox=bbox,
         )
+        log(f"[assess_taxon:build] Built {len(df_props)} proposals for downstream summaries.")
         sp, rk = self.summarize_from_proposals(df_props, csv=False, save_outputs=False, print_report=print_report)
 
         qg_map: Dict[int, str] = {}
@@ -1183,6 +1236,9 @@ class Analyzer:
 
         if df_props.empty:
             df_taxon_rel = pd.DataFrame()
+            fetch_meta["proposal_rows_generated"] = 0
+            fetch_meta["proposal_observation_count"] = 0
+            fetch_meta["unique_proposed_taxa_count"] = 0
         else:
             df_props = df_props.copy()
             df_props["is_research_grade"] = df_props["obs_id"].map(lambda oid: qg_map.get(int(oid), "") == "research")
@@ -1195,8 +1251,14 @@ class Analyzer:
             df_props["outcome"] = "unresolved"
             df_props.loc[df_props["is_confirmed"], "outcome"] = "confirmed"
             df_props.loc[df_props["is_disconfirmed"], "outcome"] = "disconfirmed"
+            df_props["proposed_taxon"] = df_props["taxon_name"]
+            df_props["proposed_taxon_id"] = pd.to_numeric(df_props["taxon_id"], errors="coerce").astype("Int64")
+            df_props["community_taxon"] = df_props["final_ct_name"].fillna("")
+            df_props["community_taxon_id"] = pd.to_numeric(df_props["final_ct_id"], errors="coerce").astype("Int64")
+            df_props["confirmed_status"] = df_props["confirmed_by_others"].map(
+                lambda v: "confirmed_after_proposal" if bool(v) else "no_confirming_id_seen"
+            )
 
-            target_taxon = self._taxon(target_taxon_id)
             target_lineage_ids = set(target_taxon.ancestor_ids) | {target_taxon.id} if target_taxon else set()
 
             def overlap_level_for_target_lineage(tid: Any) -> str:
@@ -1253,7 +1315,38 @@ class Analyzer:
             df_taxon_rel["confirmed_to_disconfirmed_ratio"] = df_taxon_rel["confirmed_count"] / df_taxon_rel[
                 "disconfirmed_count"
             ].where(df_taxon_rel["disconfirmed_count"] > 0, 1)
+
+            if target_taxon:
+                rank_name_map: Dict[str, str] = {}
+                rank_id_map: Dict[str, int] = {}
+                for tid in list(target_taxon.ancestor_ids) + [target_taxon.id]:
+                    tt = self._taxa_cache.get(tid)
+                    if not tt or not tt.rank:
+                        continue
+                    rank_name_map[tt.rank] = tt.name
+                    rank_id_map[tt.rank] = tt.id
+
+                df_taxon_rel["target_taxon_name"] = df_taxon_rel["taxonomic_level"].map(rank_name_map).fillna("")
+                df_taxon_rel["target_taxon_id"] = pd.to_numeric(
+                    df_taxon_rel["taxonomic_level"].map(rank_id_map), errors="coerce"
+                ).astype("Int64")
+                df_taxon_rel["target_taxon_label"] = df_taxon_rel.apply(
+                    lambda r: (
+                        f"{r['target_taxon_name']} ({int(r['target_taxon_id'])})"
+                        if r["target_taxon_name"] and pd.notna(r["target_taxon_id"])
+                        else str(r["taxonomic_level"])
+                    ),
+                    axis=1,
+                )
+            else:
+                df_taxon_rel["target_taxon_name"] = ""
+                df_taxon_rel["target_taxon_id"] = pd.Series([pd.NA] * len(df_taxon_rel), dtype="Int64")
+                df_taxon_rel["target_taxon_label"] = df_taxon_rel["taxonomic_level"]
+
             df_props["community_overlap_depth"] = df_props["correctness_depth"]
+            fetch_meta["proposal_rows_generated"] = int(len(df_props))
+            fetch_meta["proposal_observation_count"] = int(df_props["obs_id"].nunique())
+            fetch_meta["unique_proposed_taxa_count"] = int(df_props["taxon_id"].nunique())
 
         return {
             "proposals": df_props,

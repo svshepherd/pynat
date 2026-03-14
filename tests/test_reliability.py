@@ -236,7 +236,7 @@ def test_assess_taxon_returns_scored_output(monkeypatch, tmp_path):
 
     seen = {'taxon_id': None}
 
-    def fake_user_identifications_windowed_best_effort(user, taxon_id, start=None, end=None):
+    def fake_user_identifications_windowed_best_effort(user, taxon_id, start=None, end=None, include_withdrawn=True):
         seen['taxon_id'] = taxon_id
         return my_ids, {
             'partial_results': False,
@@ -262,10 +262,99 @@ def test_assess_taxon_returns_scored_output(monkeypatch, tmp_path):
     prop = out['proposals'].iloc[0]
     assert prop['taxon_id'] == 5001
     assert prop['outcome'] == 'confirmed'
+    assert prop['proposed_taxon'] == 'Spec A'
+    assert prop['community_taxon'] == 'Spec A'
+    assert prop['confirmed_status'] == 'confirmed_after_proposal'
 
     rel = out['taxon_reliability']
     assert not rel.empty
     assert rel['confirmed_count'].sum() == 1
+    assert out['analysis_meta']['target_scope'] == 'target_plus_descendants'
+    assert out['analysis_meta']['target_taxon_id'] == 5001
+    assert out['analysis_meta']['target_taxon_name'] == 'Spec A'
+    assert {'target_taxon_name', 'target_taxon_id', 'target_taxon_label'}.issubset(rel.columns)
+
+
+def test_assess_taxon_includes_descendant_proposals(monkeypatch, tmp_path):
+    analyzer = cm.Analyzer(cache_dir=str(tmp_path))
+
+    my_ids = [
+        {
+            'id': 1,
+            'created_at': '2024-01-01T00:00:00Z',
+            'current': True,
+            'observation': {'id': 3001},
+            'user': {'id': 11, 'login': 'demo-user'},
+            'taxon': {'id': 9002, 'name': 'Spec Child', 'rank': 'species'},
+        }
+    ]
+
+    all_ids = [
+        {
+            'id': 1,
+            'created_at': '2024-01-01T00:00:00Z',
+            'current': True,
+            'disagreement': False,
+            'observation': {'id': 3001},
+            'user': {'id': 11, 'login': 'demo-user'},
+            'taxon': {'id': 9002, 'name': 'Spec Child', 'rank': 'species'},
+        },
+        {
+            'id': 2,
+            'created_at': '2024-01-01T01:00:00Z',
+            'current': True,
+            'disagreement': False,
+            'observation': {'id': 3001},
+            'user': {'id': 22, 'login': 'other-user'},
+            'taxon': {'id': 9002, 'name': 'Spec Child', 'rank': 'species'},
+        },
+    ]
+
+    obs = [
+        {
+            'id': 3001,
+            'observed_on': '2024-01-01',
+            'created_at': '2024-01-01T00:00:00Z',
+            'updated_at': '2024-01-01T01:00:00Z',
+            'quality_grade': 'research',
+            'geojson': {'coordinates': [0.0, 0.0]},
+            'place_ids': [],
+            'community_taxon': {'id': 9002, 'name': 'Spec Child', 'rank': 'species'},
+        }
+    ]
+
+    taxa = [
+        {'id': 9001, 'name': 'Genus Parent', 'rank': 'genus', 'ancestor_ids': [1, 2, 3]},
+        {'id': 9002, 'name': 'Spec Child', 'rank': 'species', 'ancestor_ids': [1, 2, 3, 9001]},
+    ]
+
+    monkeypatch.setattr(
+        analyzer.client,
+        'user_identifications_windowed_best_effort',
+        lambda user, taxon_id, start=None, end=None, include_withdrawn=True: (
+            my_ids,
+            {
+                'partial_results': False,
+                'warning': None,
+                'loaded_proposal_count': len(my_ids),
+                'oldest_loaded_proposed_at': my_ids[0]['created_at'],
+                'fetched_pages': 1,
+                'order': 'desc',
+            },
+        ),
+    )
+    monkeypatch.setattr(analyzer.client, 'identifications_for_observations', lambda obs_ids: all_ids)
+    monkeypatch.setattr(analyzer.client, 'observations_by_ids', lambda obs_ids: obs)
+    monkeypatch.setattr(analyzer.client, 'taxa_by_ids', lambda taxon_ids: [t for t in taxa if t['id'] in set(taxon_ids)])
+
+    out = analyzer.assess_taxon('demo-user', taxon_id=9001, print_report=False)
+
+    assert len(out['proposals']) == 1
+    assert out['proposals'].iloc[0]['taxon_id'] == 9002
+    assert out['proposals'].iloc[0]['proposed_taxon'] == 'Spec Child'
+    assert out['analysis_meta']['target_taxon_name'] == 'Genus Parent'
+    assert out['analysis_meta']['lineage_filtered_identification_count'] == 1
+    assert out['analysis_meta']['proposal_rows_generated'] == 1
 
 
 def test_assess_taxon_handles_mixed_timezone_timestamps(monkeypatch, tmp_path):
@@ -320,7 +409,7 @@ def test_assess_taxon_handles_mixed_timezone_timestamps(monkeypatch, tmp_path):
     monkeypatch.setattr(
         analyzer.client,
         'user_identifications_windowed_best_effort',
-        lambda user, taxon_id, start=None, end=None: (
+        lambda user, taxon_id, start=None, end=None, include_withdrawn=True: (
             my_ids,
             {
                 'partial_results': False,
@@ -359,7 +448,7 @@ def test_assess_taxon_returns_empty_when_no_matching_taxon(monkeypatch, tmp_path
     monkeypatch.setattr(
         analyzer.client,
         'user_identifications_windowed_best_effort',
-        lambda user, taxon_id, start=None, end=None: (
+        lambda user, taxon_id, start=None, end=None, include_withdrawn=True: (
             my_ids,
             {
                 'partial_results': False,
@@ -375,6 +464,14 @@ def test_assess_taxon_returns_empty_when_no_matching_taxon(monkeypatch, tmp_path
         analyzer.client,
         'identifications_for_observations',
         lambda obs_ids: (_ for _ in ()).throw(AssertionError('should not fetch timelines for empty taxon match')),
+    )
+    monkeypatch.setattr(
+        analyzer.client,
+        'taxa_by_ids',
+        lambda taxon_ids: [
+            {'id': 5001, 'name': 'Target', 'rank': 'genus', 'ancestor_ids': [1, 2, 3]},
+            {'id': 9999, 'name': 'Other', 'rank': 'species', 'ancestor_ids': [1, 2, 3, 4444]},
+        ],
     )
 
     out = analyzer.assess_taxon('demo-user', taxon_id=5001, print_report=False)
@@ -403,7 +500,7 @@ def test_assess_taxon_reports_partial_results_on_403(monkeypatch, tmp_path):
     monkeypatch.setattr(
         analyzer.client,
         'user_identifications_windowed_best_effort',
-        lambda user, taxon_id, start=None, end=None: (
+        lambda user, taxon_id, start=None, end=None, include_withdrawn=True: (
             my_ids,
             {
                 'partial_results': True,
