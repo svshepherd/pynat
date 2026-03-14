@@ -107,6 +107,27 @@ def test_run_forwards_ingest_mode(monkeypatch):
     assert seen['mode'] == 'full'
 
 
+def test_identifications_for_observations_includes_withdrawn(monkeypatch):
+    client = cm.INatClient(sleep=0)
+    calls = []
+
+    def fake_get(endpoint, params):
+        calls.append((endpoint, dict(params)))
+        return {'results': []}
+
+    monkeypatch.setattr(client, '_get', fake_get)
+
+    out = client.identifications_for_observations([101, 102])
+
+    assert out == []
+    assert len(calls) == 1
+    endpoint, params = calls[0]
+    assert endpoint == 'identifications'
+    assert params['observation_id'] == '101,102'
+    assert params['order'] == 'asc'
+    assert params['current'] == 'any'
+
+
 def test_incremental_ingest_falls_back_to_full_on_first_run(monkeypatch, tmp_path):
     analyzer = cm.Analyzer(cache_dir=str(tmp_path))
 
@@ -226,7 +247,10 @@ def test_assess_taxon_returns_scored_output(monkeypatch, tmp_path):
             'quality_grade': 'research',
             'geojson': {'coordinates': [0.0, 0.0]},
             'place_ids': [],
-            'community_taxon': {'id': 5001, 'name': 'Spec A', 'rank': 'species'},
+            # Use fallback flattened keys to ensure extraction remains resilient.
+            'community_taxon_id': 5001,
+            'community_taxon_name': 'Spec A',
+            'community_taxon_rank': 'species',
         }
     ]
 
@@ -264,7 +288,11 @@ def test_assess_taxon_returns_scored_output(monkeypatch, tmp_path):
     assert prop['outcome'] == 'confirmed'
     assert prop['proposed_taxon'] == 'Spec A'
     assert prop['community_taxon'] == 'Spec A'
+    assert prop['community_taxon_id'] == 5001
+    assert prop['community_taxonomic_level'] == 'species'
     assert prop['confirmed_status'] == 'confirmed_after_proposal'
+    assert prop['taxonomic_level'] == 'species'
+    assert prop['community_overlap_depth'] == 'species'
 
     rel = out['taxon_reliability']
     assert not rel.empty
@@ -355,6 +383,82 @@ def test_assess_taxon_includes_descendant_proposals(monkeypatch, tmp_path):
     assert out['analysis_meta']['target_taxon_name'] == 'Genus Parent'
     assert out['analysis_meta']['lineage_filtered_identification_count'] == 1
     assert out['analysis_meta']['proposal_rows_generated'] == 1
+
+
+def test_assess_taxon_prefers_scoped_withdrawn_proposal_over_offscope_timeline_id(monkeypatch, tmp_path):
+    analyzer = cm.Analyzer(cache_dir=str(tmp_path))
+
+    # Scoped pull returns the withdrawn target-lineage ID we still want analyzed.
+    my_ids = [
+        {
+            'id': 11,
+            'created_at': '2024-01-01T00:00:00Z',
+            'current': False,
+            'observation': {'id': 90001},
+            'user': {'id': 11, 'login': 'demo-user'},
+            'taxon': {'id': 130953, 'name': 'Nabalus', 'rank': 'genus'},
+        }
+    ]
+
+    # Timeline may contain only a later off-scope ID by the same user.
+    all_ids = [
+        {
+            'id': 12,
+            'created_at': '2024-01-01T01:00:00Z',
+            'current': True,
+            'disagreement': False,
+            'observation': {'id': 90001},
+            'user': {'id': 11, 'login': 'demo-user'},
+            'taxon': {'id': 461542, 'name': 'Astereae', 'rank': 'tribe'},
+        }
+    ]
+
+    obs = [
+        {
+            'id': 90001,
+            'observed_on': '2024-01-01',
+            'created_at': '2024-01-01T00:00:00Z',
+            'updated_at': '2024-01-01T02:00:00Z',
+            'quality_grade': 'needs_id',
+            'geojson': {'coordinates': [0.0, 0.0]},
+            'place_ids': [],
+            'community_taxon': {'id': 461542, 'name': 'Astereae', 'rank': 'tribe'},
+        }
+    ]
+
+    taxa = [
+        {'id': 47126, 'name': 'Asteraceae', 'rank': 'family', 'ancestor_ids': [1, 2, 3]},
+        {'id': 130953, 'name': 'Nabalus', 'rank': 'genus', 'ancestor_ids': [1, 2, 3, 47126]},
+        {'id': 461542, 'name': 'Astereae', 'rank': 'tribe', 'ancestor_ids': [1, 2, 3, 47126]},
+    ]
+
+    monkeypatch.setattr(
+        analyzer.client,
+        'user_identifications_windowed_best_effort',
+        lambda user, taxon_id, start=None, end=None, include_withdrawn=True: (
+            my_ids,
+            {
+                'partial_results': False,
+                'warning': None,
+                'loaded_proposal_count': len(my_ids),
+                'oldest_loaded_proposed_at': my_ids[0]['created_at'],
+                'fetched_pages': 1,
+                'order': 'desc',
+            },
+        ),
+    )
+    monkeypatch.setattr(analyzer.client, 'identifications_for_observations', lambda obs_ids: all_ids)
+    monkeypatch.setattr(analyzer.client, 'observations_by_ids', lambda obs_ids: obs)
+    monkeypatch.setattr(analyzer.client, 'taxa_by_ids', lambda taxon_ids: [t for t in taxa if t['id'] in set(taxon_ids)])
+
+    out = analyzer.assess_taxon('demo-user', taxon_id=130953, print_report=False)
+
+    assert len(out['proposals']) == 1
+    prop = out['proposals'].iloc[0]
+    assert prop['taxon_id'] == 130953
+    assert prop['proposed_taxon'] == 'Nabalus'
+    assert prop['community_taxon'] == 'Astereae'
+    assert prop['community_taxonomic_level'] == 'tribe'
 
 
 def test_assess_taxon_handles_mixed_timezone_timestamps(monkeypatch, tmp_path):

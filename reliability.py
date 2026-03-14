@@ -7,7 +7,7 @@ resolved community identification.
 
 Primary workflow
 1) Fetch identifications for the user scoped to one target taxon.
-2) Build proposal events from timeline data (including withdrawn proposals).
+2) Build id-proposal events from timeline data (including withdrawn proposals).
 3) Classify proposals as confirmed, disconfirmed, or unresolved.
 4) Report overlap depth and confirmed/disconfirmed ratios by taxonomic level.
 
@@ -282,7 +282,15 @@ class INatClient:
         out = []
         # identifications supports comma-separated observation_id
         for batch in tqdm(list(chunks(obs_ids, 200)), desc="identifications(obs)"):
-            j = self._get("identifications", {"observation_id": ",".join(map(str, batch)), "per_page": 200, "order": "asc"})
+            j = self._get(
+                "identifications",
+                {
+                    "observation_id": ",".join(map(str, batch)),
+                    "per_page": 200,
+                    "order": "asc",
+                    "current": "any",
+                },
+            )
             out.extend(j.get("results", []))
             time.sleep(self.sleep)
         return out
@@ -839,6 +847,9 @@ class Analyzer:
         user_login: str,
         df_all: pd.DataFrame,
         df_obs: pd.DataFrame,
+        df_user_scoped: Optional[pd.DataFrame] = None,
+        scoped_taxon_ids: Optional[Set[int]] = None,
+        target_taxon_id: Optional[int] = None,
         start: Optional[str] = None,
         end: Optional[str] = None,
         place_ids: Optional[List[int]] = None,
@@ -904,20 +915,78 @@ class Analyzer:
         df_all.sort_values(["observation.id", "_created_at_utc"], inplace=True)
         proposals: List[Proposal] = []
 
+        def in_target_descendants(raw_tid: Any) -> bool:
+            if pd.isna(raw_tid):
+                return False
+            tid = int(raw_tid)
+            if target_taxon_id is None:
+                return True
+            t = self._taxon(tid)
+            if not t:
+                return False
+            return tid == target_taxon_id or target_taxon_id in set(t.ancestor_ids)
+
         for obs_id, g in tqdm(df_all.groupby("observation.id"), desc="proposals(obs)"):
             g = g.reset_index(drop=True)
 
             om = obs_meta.loc[obs_id] if obs_id in obs_meta.index else None
+
+            def obs_get(field_paths: List[str], default: Any = None) -> Any:
+                """Fetch observation metadata value from normalized or fallback keys."""
+                if om is None:
+                    return default
+                for field in field_paths:
+                    value = om.get(field)
+                    if value is None:
+                        continue
+                    if isinstance(value, float) and pd.isna(value):
+                        continue
+                    return value
+                ct_raw = om.get("community_taxon")
+                if isinstance(ct_raw, dict):
+                    for field in field_paths:
+                        tail = field.split(".")[-1]
+                        if tail in ct_raw and ct_raw.get(tail) is not None:
+                            return ct_raw.get(tail)
+                return default
+
             observed_on = om.get("observed_on") if om is not None else None
             coords = om.get("geojson.coordinates") if om is not None else None
             lat = coords[1] if isinstance(coords, list) and len(coords) >= 2 else None
             lon = coords[0] if isinstance(coords, list) and len(coords) >= 2 else None
             places = tuple(om.get("place_ids") or ()) if om is not None else tuple()
-            ct_id = om.get("community_taxon.id") if om is not None else None
-            ct_name = om.get("community_taxon.name") if om is not None else None
-            ct_rank = om.get("community_taxon.rank") if om is not None else None
+            ct_id = obs_get(["community_taxon.id", "community_taxon_id"])
+            ct_name = obs_get(["community_taxon.name", "community_taxon_name"])
+            ct_rank = obs_get(["community_taxon.rank", "community_taxon_rank"])
 
-            mine = g[g["user.login"] == user_login]
+            mine = g[g["user.login"] == user_login].copy()
+            if scoped_taxon_ids:
+                mine = mine[mine["taxon.id"].map(lambda x: pd.notna(x) and int(x) in scoped_taxon_ids)]
+            mine = mine[mine["taxon.id"].map(in_target_descendants)]
+
+            # Ensure scoped withdrawn IDs are not lost if timeline endpoint omits them.
+            if (
+                df_user_scoped is not None
+                and not df_user_scoped.empty
+                and {"observation.id", "taxon.id", "created_at"}.issubset(df_user_scoped.columns)
+            ):
+                mine_scope = df_user_scoped[df_user_scoped["observation.id"] == obs_id].copy()
+                if scoped_taxon_ids:
+                    mine_scope = mine_scope[
+                        mine_scope["taxon.id"].map(lambda x: pd.notna(x) and int(x) in scoped_taxon_ids)
+                    ]
+                mine_scope = mine_scope[mine_scope["taxon.id"].map(in_target_descendants)]
+                if not mine_scope.empty:
+                    mine_scope["_created_at_utc"] = pd.to_datetime(
+                        mine_scope.get("created_at"), utc=True, errors="coerce"
+                    )
+                    if "id" in mine.columns and "id" in mine_scope.columns and not mine.empty:
+                        timeline_ids = set(mine["id"].dropna().astype(int).tolist())
+                        mine_scope = mine_scope[
+                            ~mine_scope["id"].map(lambda v: pd.notna(v) and int(v) in timeline_ids)
+                        ]
+                    mine = pd.concat([mine, mine_scope], ignore_index=True, sort=False)
+
             if mine.empty:
                 continue
             mine = mine.sort_values("_created_at_utc")
@@ -1165,6 +1234,9 @@ class Analyzer:
             lineage_mask = my_taxon.notna()
 
         df_my_taxon = df_my[lineage_mask.fillna(False)].copy()
+        scoped_taxon_ids = set(
+            pd.to_numeric(df_my_taxon.get("taxon.id"), errors="coerce").dropna().astype(int).tolist()
+        )
         fetch_meta["candidate_identification_count"] = int(len(df_my))
         fetch_meta["lineage_filtered_identification_count"] = int(len(df_my_taxon))
         if df_my_taxon.empty:
@@ -1197,11 +1269,25 @@ class Analyzer:
         df_all = pd.json_normalize(all_ids)
         df_obs = pd.json_normalize(obs)
 
+        def _obs_series(col_names: List[str]) -> pd.Series:
+            for col_name in col_names:
+                if col_name in df_obs.columns:
+                    return pd.to_numeric(df_obs[col_name], errors="coerce")
+            if "community_taxon" in df_obs.columns:
+                return pd.to_numeric(
+                    df_obs["community_taxon"].map(
+                        lambda v: v.get("id") if isinstance(v, dict) else None
+                    ),
+                    errors="coerce",
+                )
+            return pd.Series(dtype="float64")
+
         taxon_series = []
         if "taxon.id" in df_all.columns:
             taxon_series.append(df_all["taxon.id"])
-        if "community_taxon.id" in df_obs.columns:
-            taxon_series.append(df_obs["community_taxon.id"])
+        obs_ct_ids = _obs_series(["community_taxon.id", "community_taxon_id"])
+        if not obs_ct_ids.empty:
+            taxon_series.append(obs_ct_ids)
         if taxon_series:
             all_taxon_ids = set(pd.concat(taxon_series, axis=0).dropna().astype(int).tolist())
         else:
@@ -1221,6 +1307,9 @@ class Analyzer:
             user_login=user_login,
             df_all=df_all,
             df_obs=df_obs,
+            df_user_scoped=df_my_taxon,
+            scoped_taxon_ids=scoped_taxon_ids,
+            target_taxon_id=target_taxon_id,
             start=start,
             end=end,
             place_ids=place_ids,
@@ -1253,8 +1342,9 @@ class Analyzer:
             df_props.loc[df_props["is_disconfirmed"], "outcome"] = "disconfirmed"
             df_props["proposed_taxon"] = df_props["taxon_name"]
             df_props["proposed_taxon_id"] = pd.to_numeric(df_props["taxon_id"], errors="coerce").astype("Int64")
-            df_props["community_taxon"] = df_props["final_ct_name"].fillna("")
+            df_props["community_taxon"] = df_props["final_ct_name"].astype("string")
             df_props["community_taxon_id"] = pd.to_numeric(df_props["final_ct_id"], errors="coerce").astype("Int64")
+            df_props["community_taxonomic_level"] = df_props["final_ct_rank"].astype("string")
             df_props["confirmed_status"] = df_props["confirmed_by_others"].map(
                 lambda v: "confirmed_after_proposal" if bool(v) else "no_confirming_id_seen"
             )
