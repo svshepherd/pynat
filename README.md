@@ -36,7 +36,6 @@ Exploratory notebooks are under `notebooks/exploratory/` and are not treated as 
 Binder tips:
 - Cold starts can take a few minutes.
 - For reproducible demos, replace `main` in URLs with a release tag.
-- Start with low-traffic settings (`per_page=25`, `max_pages=2`, `fetch_images=False`).
 
 ## Authentication and secrets
 
