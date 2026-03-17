@@ -480,8 +480,8 @@ def coming_soon(kind: str = 'any',
                 limit: int = 10,
                 token: Optional[str] = None,
                 session: Optional[requests.Session] = None,
-                per_page: int = 50,
-                max_pages: int = 5,
+                per_page: Optional[int] = None,
+                max_pages: Optional[int] = None,
                 fetch_images: bool = False,
                 use_cache: bool = True,
                 lineage_filter: str = 'any',
@@ -502,7 +502,10 @@ def coming_soon(kind: str = 'any',
         If provided, normalize counts by ``'time'``, ``'place'`` or
         ``'overall'`` frequency to produce a relative ranking.
     limit:
-        Maximum number of species rows to return.
+        Maximum number of species rows to return. Values above 25 are capped.
+    per_page, max_pages:
+        Optional pagination overrides for API calls. Leave as ``None`` to use
+        API defaults.
     lineage_filter:
         Optional nativity filter. Supported values are ``'any'`` (default),
         ``'native_endemic'``, and ``'introduced'``.
@@ -542,8 +545,13 @@ def coming_soon(kind: str = 'any',
     else:
         raise ValueError(f"expected loc triple of lat,long,radius")
 
-    per_page = max(1, int(per_page))
-    max_pages = max(1, int(max_pages))
+    requested_limit = max(1, int(limit))
+    capped_limit = min(requested_limit, 25)
+    if requested_limit > 25:
+        logger.info('Requested limit=%s exceeds cap; using 25', requested_limit)
+
+    per_page_value = max(1, int(per_page)) if per_page is not None else None
+    max_pages_value = max(1, int(max_pages)) if max_pages is not None else None
 
     time = []
     strt = dt.date.today()+dt.timedelta(days=-6)
@@ -568,27 +576,44 @@ def coming_soon(kind: str = 'any',
     results = []
     for t in time:
         if HAS_PYINAT:
-            resp = inat.get_observation_species_counts(verifiable=True, per_page=per_page, **taxa, **t, **place)
+            species_count_kwargs = {'verifiable': True, **taxa, **t, **place}
+            if per_page_value is not None:
+                species_count_kwargs['per_page'] = per_page_value
+            resp = inat.get_observation_species_counts(**species_count_kwargs)
             frames = pd.json_normalize(resp.get('results', []))
         else:
-            # fallback to direct REST API with bounded pagination
+            # fallback to direct REST API; use API defaults unless paging overrides are provided
             url = "https://api.inaturalist.org/v1/observations/species_counts"
-            chunk_frames = []
-            for page in range(1, max_pages + 1):
-                params = {**taxa, **t, **place, 'verifiable': 'true', 'per_page': per_page, 'page': page}
+            if max_pages_value is None:
+                params = {**taxa, **t, **place, 'verifiable': 'true'}
+                if per_page_value is not None:
+                    params['per_page'] = per_page_value
                 try:
                     r = session.get(url, params=params, timeout=30)
                     r.raise_for_status()
-                    page_df = pd.json_normalize(r.json().get('results', []))
-                    if page_df.empty:
-                        break
-                    chunk_frames.append(page_df)
-                    if len(page_df) < per_page:
-                        break
+                    frames = pd.json_normalize(r.json().get('results', []))
                 except Exception as e:
                     logger.warning('Failed REST call for observation_species_counts: %s', e)
-                    break
-            frames = pd.concat(chunk_frames, ignore_index=True) if chunk_frames else pd.DataFrame()
+                    frames = pd.DataFrame()
+            else:
+                chunk_frames = []
+                for page in range(1, max_pages_value + 1):
+                    params = {**taxa, **t, **place, 'verifiable': 'true', 'page': page}
+                    if per_page_value is not None:
+                        params['per_page'] = per_page_value
+                    try:
+                        r = session.get(url, params=params, timeout=30)
+                        r.raise_for_status()
+                        page_df = pd.json_normalize(r.json().get('results', []))
+                        if page_df.empty:
+                            break
+                        chunk_frames.append(page_df)
+                        if per_page_value is not None and len(page_df) < per_page_value:
+                            break
+                    except Exception as e:
+                        logger.warning('Failed REST call for observation_species_counts: %s', e)
+                        break
+                frames = pd.concat(chunk_frames, ignore_index=True) if chunk_frames else pd.DataFrame()
         results.append(frames)
     results = pd.concat(results)[COLS]
     results = results.groupby(['taxon.id', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url', 'taxon.default_photo.medium_url']).sum().reset_index()
@@ -606,26 +631,43 @@ def coming_soon(kind: str = 'any',
             for i in range(0, len(taxon_ids_list), chunk_size):
                 chunk = taxon_ids_list[i:i + chunk_size]
                 if HAS_PYINAT:
-                    resp = inat.get_observation_species_counts(taxon_id=chunk, verifiable=True, per_page=per_page, **extra_kwargs)
+                    count_kwargs = {'taxon_id': chunk, 'verifiable': True, **extra_kwargs}
+                    if per_page_value is not None:
+                        count_kwargs['per_page'] = per_page_value
+                    resp = inat.get_observation_species_counts(**count_kwargs)
                     df = pd.json_normalize(resp.get('results', []))
                 else:
                     url = "https://api.inaturalist.org/v1/observations/species_counts"
-                    page_frames = []
-                    for page in range(1, max_pages + 1):
-                        params = {**extra_kwargs, 'taxon_id': chunk, 'verifiable': 'true', 'per_page': per_page, 'page': page}
+                    if max_pages_value is None:
+                        params = {**extra_kwargs, 'taxon_id': chunk, 'verifiable': 'true'}
+                        if per_page_value is not None:
+                            params['per_page'] = per_page_value
                         try:
                             r = session.get(url, params=params, timeout=30)
                             r.raise_for_status()
-                            page_df = pd.json_normalize(r.json().get('results', []))
-                            if page_df.empty:
-                                break
-                            page_frames.append(page_df)
-                            if len(page_df) < per_page:
-                                break
+                            df = pd.json_normalize(r.json().get('results', []))
                         except Exception as e:
                             logger.warning('Failed REST call for chunked observation_species_counts: %s', e)
-                            break
-                    df = pd.concat(page_frames, ignore_index=True) if page_frames else pd.DataFrame()
+                            df = pd.DataFrame()
+                    else:
+                        page_frames = []
+                        for page in range(1, max_pages_value + 1):
+                            params = {**extra_kwargs, 'taxon_id': chunk, 'verifiable': 'true', 'page': page}
+                            if per_page_value is not None:
+                                params['per_page'] = per_page_value
+                            try:
+                                r = session.get(url, params=params, timeout=30)
+                                r.raise_for_status()
+                                page_df = pd.json_normalize(r.json().get('results', []))
+                                if page_df.empty:
+                                    break
+                                page_frames.append(page_df)
+                                if per_page_value is not None and len(page_df) < per_page_value:
+                                    break
+                            except Exception as e:
+                                logger.warning('Failed REST call for chunked observation_species_counts: %s', e)
+                                break
+                        df = pd.concat(page_frames, ignore_index=True) if page_frames else pd.DataFrame()
                 if not df.empty:
                     frames.append(df)
             return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -657,7 +699,7 @@ def coming_soon(kind: str = 'any',
             results.sort_values('sorter', ascending=False, inplace=True)
 
     if normalized_kind in PHENOTYPE_IMAGE_KINDS and not results.empty:
-        for idx in results.head(limit).index:
+        for idx in results.head(capped_limit).index:
             taxon_id = results.at[idx, 'taxon.id']
             if pd.isna(taxon_id):
                 continue
@@ -693,7 +735,7 @@ def coming_soon(kind: str = 'any',
             results = results[results['nativity'].isin(['Native', 'Endemic'])]
 
     # Display species names and their main images
-    for index, row in results.head(limit).iterrows():
+    for index, row in results.head(capped_limit).iterrows():
         taxon_name = row['taxon.name']
         common_name = row.get('taxon.preferred_common_name', 'N/A')
         wiki_url = row.get('taxon.wikipedia_url')
@@ -744,7 +786,7 @@ def coming_soon(kind: str = 'any',
                 logger.debug('Skipping image display for %s: %s', image_url, e)
         ### It'd be nice to specifically select images w/ appropriate phenotype
             
-    return results
+    return results.head(capped_limit).copy()
 
 
 def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = None, session: Optional[requests.Session] = None, use_cache: bool = True, per_page: int = 50, max_pages: int = 5) -> pd.DataFrame:
@@ -884,8 +926,6 @@ def _run_coming_soon_query(kind_value: str,
                            location_kwargs: dict[str, Any],
                            norm_value: Optional[str],
                            limit_value: int,
-                           per_page_value: int,
-                           max_pages_value: int,
                            fetch_images_value: bool,
                            use_cache_value: bool,
                            lineage_filter_value: str,
@@ -898,8 +938,6 @@ def _run_coming_soon_query(kind_value: str,
         **location_kwargs,
         norm=norm_arg,
         limit=int(limit_value),
-        per_page=int(per_page_value),
-        max_pages=int(max_pages_value),
         fetch_images=bool(fetch_images_value),
         use_cache=bool(use_cache_value),
         lineage_filter=lineage_filter_value,
@@ -949,8 +987,7 @@ def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
         Optional overrides for control defaults. Supported keys include:
         ``kind``, ``place_mode``, ``place_id``, ``lat``, ``lon``, ``radius_km``,
         ``norm``, ``lineage_filter``, ``nativity_place_mode``,
-        ``nativity_place_id``, ``limit``, ``fetch_images``, ``per_page``,
-        ``max_pages``, ``use_cache``.
+        ``nativity_place_id``, ``limit``, ``fetch_images``, ``use_cache``.
     use_widgets:
         Force widget mode on/off. If ``None``, auto-detects availability.
     token, session:
@@ -978,8 +1015,6 @@ def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
         'nativity_place_id': 1297,
         'limit': 7,
         'fetch_images': True,
-        'per_page': 25,
-        'max_pages': 2,
         'use_cache': True,
     }
     if defaults:
@@ -1039,7 +1074,8 @@ def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
         lat_w = widgets.FloatText(value=float(cfg['lat']), description='Lat:')
         lon_w = widgets.FloatText(value=float(cfg['lon']), description='Lon:')
         radius_w = widgets.FloatText(value=float(cfg['radius_km']), description='Radius km:')
-        limit_w = widgets.BoundedIntText(value=int(cfg['limit']), min=1, max=200, description='Limit:')
+        limit_default = max(1, min(int(cfg['limit']), 25))
+        limit_w = widgets.BoundedIntText(value=limit_default, min=1, max=25, description='Limit:')
         fetch_images_w = widgets.Checkbox(value=bool(cfg['fetch_images']), description='Fetch images')
 
         norm_w = widgets.Dropdown(options=norm_options, value=cfg['norm'], description='Norm:')
@@ -1051,8 +1087,6 @@ def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
         )
         nativity_place_id_w = widgets.IntText(value=int(cfg['nativity_place_id']), description='Nativity ID:')
         nativity_place_name_w = widgets.HTML(value='')
-        per_page_w = widgets.BoundedIntText(value=int(cfg['per_page']), min=10, max=200, description='Per page:')
-        max_pages_w = widgets.BoundedIntText(value=int(cfg['max_pages']), min=1, max=8, description='Pages:')
         use_cache_w = widgets.Checkbox(value=bool(cfg['use_cache']), description='Use cache')
 
         place_id_box = widgets.VBox([place_id_w, place_id_name_w])
@@ -1089,8 +1123,8 @@ def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
         _update_nativity_visibility()
         _refresh_place_labels()
 
-        basic_box = widgets.VBox([
-            widgets.HTML('<h4>Start here (basic)</h4>'),
+        options_row = widgets.VBox([fetch_images_w, use_cache_w])
+        controls_box = widgets.VBox([
             kind_w,
             place_mode_w,
             place_id_box,
@@ -1098,15 +1132,9 @@ def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
             norm_w,
             lineage_filter_w,
             nativity_place_mode_w,
-            fetch_images_w,
-        ])
-        advanced_box = widgets.VBox([
-            widgets.HTML('<h4>Advanced (optional)</h4>'),
-            limit_w,
             nativity_id_box,
-            per_page_w,
-            max_pages_w,
-            use_cache_w,
+            limit_w,
+            options_row,
         ])
 
         run_button = widgets.Button(description='Run Query', button_style='success')
@@ -1130,8 +1158,6 @@ def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
                         location_kwargs,
                         norm_w.value,
                         limit_w.value,
-                        per_page_w.value,
-                        max_pages_w.value,
                         fetch_images_w.value,
                         use_cache_w.value,
                         lineage_filter_w.value,
@@ -1154,7 +1180,7 @@ def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
                 except Exception as exc:
                     if Markdown is not None:
                         display(Markdown(f'**Could not run query:** {exc}'))
-                        display(Markdown('Tips: verify Place ID or coordinates, then try fewer pages (1-2).'))
+                        display(Markdown('Tips: verify Place ID or coordinates and try a different group.'))
                     else:
                         print(f'Could not run query: {exc}')
 
@@ -1162,7 +1188,7 @@ def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
         state['mode'] = 'widgets'
         state['run_button'] = run_button
         state['output'] = out
-        display(basic_box, advanced_box)
+        display(controls_box)
         if Markdown is not None:
             display(Markdown('Click **Run Query** to execute.'))
         display(run_button, out)
@@ -1185,8 +1211,6 @@ def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
             location_kwargs,
             str(cfg['norm']),
             int(cfg['limit']),
-            int(cfg['per_page']),
-            int(cfg['max_pages']),
             bool(cfg['fetch_images']),
             bool(cfg['use_cache']),
             str(cfg['lineage_filter']),
