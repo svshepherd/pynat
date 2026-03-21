@@ -551,7 +551,6 @@ def _build_observation_query(kind: str,
         'verifiable': verifiable,
         'order_by': order_by,
         'order': order,
-        'identifications': 'most_activity',
     }
     if taxa_filters:
         query.update({key: value for key, value in taxa_filters.items() if value is not None})
@@ -757,14 +756,13 @@ def get_observation_rows(kind: str = 'any',
 
     rows = []
     for page in range(1, max_pages_value + 1):
-        if HAS_PYINAT:
-            payload = inat.get_observations(session=session, page=page, per_page=per_page_value, **query)
-        else:
-            payload = {}
-            params = _rest_params_from_query({**query, 'page': page, 'per_page': per_page_value})
-            response = session.get('https://api.inaturalist.org/v1/observations', params=params, timeout=30)
-            response.raise_for_status()
-            payload = response.json()
+        # Always use REST API for paginated queries since pyinaturalist's get_observations
+        # doesn't support manual pagination with page parameter.
+        payload = {}
+        params = _rest_params_from_query({**query, 'page': page, 'per_page': per_page_value})
+        response = session.get('https://api.inaturalist.org/v1/observations', params=params, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
 
         results = payload.get('results', []) if isinstance(payload, dict) else []
         if not results:

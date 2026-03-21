@@ -410,51 +410,65 @@ def test_coming_soon_places_conflicts_with_loc():
 def test_get_observation_rows_pyinat(monkeypatch):
     import helpers as h
 
-    def fake_get_observations(**kwargs):
-        assert kwargs['project_id'] == 'virginia-physiographic-regions-piedmont'
-        return {
-            'results': [
-                {
-                    'id': 101,
-                    'observed_on': '2026-03-01',
-                    'time_observed_at': '2026-03-01T14:00:00Z',
-                    'created_at': '2026-03-01T15:00:00Z',
-                    'quality_grade': 'research',
-                    'place_guess': 'Virginia Piedmont',
-                    'user': {'id': 11, 'login': 'observer'},
-                    'taxon': {
-                        'id': 47157,
-                        'name': 'Danaus plexippus',
-                        'preferred_common_name': 'Monarch',
-                        'rank': 'species',
-                        'iconic_taxon_name': 'Insecta',
-                        'default_photo': {'medium_url': 'https://example.org/default.jpg'},
-                    },
-                    'geojson': {'coordinates': [-77.5, 37.6]},
-                    'identifications_count': 2,
-                    'num_identification_agreements': 1,
-                    'num_identification_disagreements': 0,
-                    'observation_photos': [{'photo': {'url': 'https://example.org/photos/1/square.jpg'}}],
-                    'identifications': [
-                        {
-                            'created_at': '2026-03-01T15:00:00Z',
-                            'own_observation': True,
-                            'user': {'id': 11},
-                        },
-                        {
-                            'created_at': '2026-03-03T12:00:00Z',
-                            'own_observation': False,
-                            'user': {'id': 12},
-                        },
-                    ],
-                }
-            ]
-        }
+    test_observation = {
+        'id': 101,
+        'observed_on': '2026-03-01',
+        'time_observed_at': '2026-03-01T14:00:00Z',
+        'created_at': '2026-03-01T15:00:00Z',
+        'quality_grade': 'research',
+        'place_guess': 'Virginia Piedmont',
+        'user': {'id': 11, 'login': 'observer'},
+        'taxon': {
+            'id': 47157,
+            'name': 'Danaus plexippus',
+            'preferred_common_name': 'Monarch',
+            'rank': 'species',
+            'iconic_taxon_name': 'Insecta',
+            'default_photo': {'medium_url': 'https://example.org/default.jpg'},
+        },
+        'geojson': {'coordinates': [-77.5, 37.6]},
+        'identifications_count': 2,
+        'num_identification_agreements': 1,
+        'num_identification_disagreements': 0,
+        'observation_photos': [{'photo': {'url': 'https://example.org/photos/1/square.jpg'}}],
+        'identifications': [
+            {
+                'created_at': '2026-03-01T15:00:00Z',
+                'own_observation': True,
+                'user': {'id': 11},
+            },
+            {
+                'created_at': '2026-03-03T12:00:00Z',
+                'own_observation': False,
+                'user': {'id': 12},
+            },
+        ],
+    }
 
-    if not h.HAS_PYINAT:
-        pytest.skip('pyinaturalist not installed; this test covers pyinaturalist path')
+    class FakeSession:
+        def __init__(self):
+            self.call_count = 0
 
-    monkeypatch.setattr(h.inat, 'get_observations', fake_get_observations)
+        def get(self, url, params=None, timeout=None):
+            # Verify we're calling the observations endpoint
+            assert 'observations' in url
+            self.call_count += 1
+            
+            class FakeResp:
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    # Return results on first call (page 1), empty on subsequent
+                    if self.call_count == 1:
+                        return {'results': [test_observation], 'total_results': 1}
+                    return {'results': []}
+            
+            resp = FakeResp()
+            resp.call_count = self.call_count
+            return resp
+
+    fake_session = FakeSession()
     frame = h.get_observation_rows(
         kind='butterflies',
         project_id='virginia-physiographic-regions-piedmont',
@@ -462,6 +476,7 @@ def test_get_observation_rows_pyinat(monkeypatch):
         d2='2026-03-31',
         per_page=10,
         max_pages=1,
+        session=fake_session,
     )
 
     assert list(frame['obs_id']) == [101]
