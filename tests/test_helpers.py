@@ -406,3 +406,176 @@ def test_coming_soon_places_conflicts_with_loc():
     with pytest.raises(AssertionError, match='only one of places and loc should be provided'):
         h.coming_soon(places=[1], loc=(0, 0, 1), limit=1)
 
+
+def test_get_observation_rows_pyinat(monkeypatch):
+    import helpers as h
+
+    def fake_get_observations(**kwargs):
+        assert kwargs['project_id'] == 'virginia-physiographic-regions-piedmont'
+        return {
+            'results': [
+                {
+                    'id': 101,
+                    'observed_on': '2026-03-01',
+                    'time_observed_at': '2026-03-01T14:00:00Z',
+                    'created_at': '2026-03-01T15:00:00Z',
+                    'quality_grade': 'research',
+                    'place_guess': 'Virginia Piedmont',
+                    'user': {'id': 11, 'login': 'observer'},
+                    'taxon': {
+                        'id': 47157,
+                        'name': 'Danaus plexippus',
+                        'preferred_common_name': 'Monarch',
+                        'rank': 'species',
+                        'iconic_taxon_name': 'Insecta',
+                        'default_photo': {'medium_url': 'https://example.org/default.jpg'},
+                    },
+                    'geojson': {'coordinates': [-77.5, 37.6]},
+                    'identifications_count': 2,
+                    'num_identification_agreements': 1,
+                    'num_identification_disagreements': 0,
+                    'observation_photos': [{'photo': {'url': 'https://example.org/photos/1/square.jpg'}}],
+                    'identifications': [
+                        {
+                            'created_at': '2026-03-01T15:00:00Z',
+                            'own_observation': True,
+                            'user': {'id': 11},
+                        },
+                        {
+                            'created_at': '2026-03-03T12:00:00Z',
+                            'own_observation': False,
+                            'user': {'id': 12},
+                        },
+                    ],
+                }
+            ]
+        }
+
+    if not h.HAS_PYINAT:
+        pytest.skip('pyinaturalist not installed; this test covers pyinaturalist path')
+
+    monkeypatch.setattr(h.inat, 'get_observations', fake_get_observations)
+    frame = h.get_observation_rows(
+        kind='butterflies',
+        project_id='virginia-physiographic-regions-piedmont',
+        d1='2026-03-01',
+        d2='2026-03-31',
+        per_page=10,
+        max_pages=1,
+    )
+
+    assert list(frame['obs_id']) == [101]
+    assert frame.loc[0, 'query_kind'] == 'butterflies'
+    assert frame.loc[0, 'taxon_name'] == 'Danaus plexippus'
+    assert frame.loc[0, 'iconic_taxon_name'] == 'Insecta'
+    assert frame.loc[0, 'photo_url'] == 'https://example.org/photos/1/medium.jpg'
+    assert frame.loc[0, 'all_identification_count'] == 2
+    assert frame.loc[0, 'non_owner_identification_count'] == 1
+    assert frame.loc[0, 'all_identification_timestamps'] == [
+        '2026-03-01T15:00:00+00:00',
+        '2026-03-03T12:00:00+00:00',
+    ]
+    assert frame.loc[0, 'non_owner_identification_timestamps'] == ['2026-03-03T12:00:00+00:00']
+    assert frame.loc[0, 'first_non_owner_identification_at'].isoformat() == '2026-03-03T12:00:00+00:00'
+    assert frame.loc[0, 'first_non_owner_identification_delay_days'] == pytest.approx(2.5)
+
+
+def test_get_observation_rows_rest_fallback(monkeypatch):
+    import helpers as h
+
+    class FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                'results': [
+                    {
+                        'id': 202,
+                        'observed_on': '2026-02-14',
+                        'created_at': '2026-02-14T10:00:00Z',
+                        'quality_grade': 'needs_id',
+                        'location': '37.55,-78.10',
+                        'user': {'id': 20, 'login': 'rest-observer'},
+                        'taxon': {
+                            'id': 123,
+                            'name': 'Actias luna',
+                            'preferred_common_name': 'Luna Moth',
+                            'rank': 'species',
+                            'iconic_taxon_name': 'Insecta',
+                        },
+                        'identifications': [],
+                    }
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, params=None, timeout=30):
+            self.calls.append((url, params))
+            return FakeResp()
+
+    monkeypatch.setattr(h, 'HAS_PYINAT', False)
+    session = FakeSession()
+    frame = h.get_observation_rows(
+        kind='any',
+        project_id='virginia-physiographic-regions-piedmont',
+        per_page=10,
+        max_pages=1,
+        session=session,
+    )
+
+    assert list(frame['obs_id']) == [202]
+    assert frame.loc[0, 'observer_login'] == 'rest-observer'
+    assert frame.loc[0, 'all_identification_count'] == 0
+    assert frame.loc[0, 'non_owner_identification_count'] == 0
+    assert frame.loc[0, 'all_identification_timestamps'] == []
+    assert frame.loc[0, 'latitude'] == pytest.approx(37.55)
+    assert frame.loc[0, 'longitude'] == pytest.approx(-78.10)
+    assert session.calls[0][1]['project_id'] == 'virginia-physiographic-regions-piedmont'
+
+
+def test_annotate_taxon_nativity_reuses_cache(monkeypatch):
+    import helpers as h
+
+    calls = []
+
+    def fake_lookup(session, taxon_id, nativity_place_id=None):
+        calls.append((taxon_id, nativity_place_id))
+        return 'Native'
+
+    monkeypatch.setattr(h, '_lookup_nativity_via_species_counts', fake_lookup)
+
+    frame = pd.DataFrame({'taxon_id': [1, 1, 2, None]})
+    out = h.annotate_taxon_nativity(frame, nativity_place_id=1297, session=object())
+
+    assert out['nativity'].tolist() == ['Native', 'Native', 'Native', 'Unknown']
+    assert calls == [(1, 1297), (2, 1297)]
+
+
+def test_summarize_time_series_counts_and_means():
+    import helpers as h
+
+    frame = pd.DataFrame(
+        {
+            'obs_id': [1, 2, 3],
+            'iconic_taxon_name': ['Insecta', 'Insecta', 'Plantae'],
+            'observed_on': ['2026-03-01', '2026-03-15', '2026-04-01'],
+            'first_non_owner_identification_delay_days': [2.0, 4.0, 1.0],
+        }
+    )
+
+    summary = h.summarize_time_series(
+        frame,
+        date_col='observed_on',
+        freq='M',
+        group_cols=['iconic_taxon_name'],
+        value_aggs={'mean_delay_days': ('first_non_owner_identification_delay_days', 'mean')},
+    )
+
+    insect_row = summary[summary['iconic_taxon_name'] == 'Insecta'].iloc[0]
+    assert insect_row['count'] == 2
+    assert insect_row['mean_delay_days'] == pytest.approx(3.0)
+

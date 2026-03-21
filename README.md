@@ -60,6 +60,9 @@ if token:
 Implemented in `helpers.py`:
 - `coming_soon(...)`: seasonal/common taxa with optional normalization and nativity filtering.
 - `get_park_data(...)`: park-centered species ranking by relative frequency.
+- `get_observation_rows(...)`: project/place/date-scoped observation rows for exploratory analyses.
+- `annotate_taxon_nativity(...)`: add Virginia-or-place nativity labels to observation/taxon tables.
+- `summarize_time_series(...)`: period-based counts and summary metrics for observation dataframes.
 - `coming_soon_notebook(...)`: notebook UI wrapper used by the public notebook.
 - `get_mine(...)`: fetch and print recent observations for a user.
 
@@ -83,11 +86,24 @@ parks = get_park_data(
     per_page=25,
     max_pages=2,
 )
+
+obs = get_observation_rows(
+    project_id="virginia-physiographic-regions-piedmont",
+    d1="2024-01-01",
+    per_page=100,
+    max_pages=5,
+)
+
+monthly_obs = summarize_time_series(obs, date_col="observed_on", freq="M")
 ```
 
 Fallback behavior:
 - When `pyinaturalist` is unavailable, helper queries fall back to direct REST calls.
 - Fallback calls are bounded by `per_page` and `max_pages` to avoid unbounded network fetches.
+
+Exploratory notebook prototypes:
+- `notebooks/exploratory/va_piedmont_native_phenology.ipynb`: native Lepidoptera prevalence and life-stage exploration for the Virginia Piedmont project.
+- `notebooks/exploratory/va_piedmont_identification_timing.ipynb`: observation volume, first non-owner identification volume, and delay summaries over time.
 
 ## Reliability analysis (`reliability.py`)
 

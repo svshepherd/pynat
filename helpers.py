@@ -15,7 +15,7 @@ import requests
 import pandas as pd
 import numpy as np
 import datetime as dt
-from typing import Tuple, Union, Optional, Any
+from typing import Tuple, Union, Optional, Any, Iterable
 from time import sleep
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
@@ -45,6 +45,38 @@ logger = logging.getLogger(__name__)
 VERTEBRATES_TAXON_ID = 355675
 PHENOTYPE_IMAGE_KINDS = {'flowers', 'fruits', 'butterflies', 'caterpillars'}
 DEFAULT_NATIVITY_PLACE_ID = 1297  # Virginia
+OBSERVATION_ROW_COLUMNS = [
+    'obs_id',
+    'observed_on',
+    'observed_at',
+    'created_at',
+    'quality_grade',
+    'query_kind',
+    'query_project_id',
+    'observer_id',
+    'observer_login',
+    'taxon_id',
+    'taxon_name',
+    'taxon_preferred_common_name',
+    'taxon_rank',
+    'iconic_taxon_name',
+    'latitude',
+    'longitude',
+    'place_guess',
+    'positional_accuracy',
+    'identifications_count',
+    'all_identification_count',
+    'non_owner_identification_count',
+    'num_identification_agreements',
+    'num_identification_disagreements',
+    'all_identification_timestamps',
+    'non_owner_identification_timestamps',
+    'first_identification_at',
+    'first_non_owner_identification_at',
+    'first_identification_delay_days',
+    'first_non_owner_identification_delay_days',
+    'photo_url',
+]
 
 
 def _derive_place_id_from_location(
@@ -471,6 +503,370 @@ def get_inat_session(token: Optional[str] = None,
         # iNaturalist expects Token token="..." in the Authorization header for some clients
         session.headers.update({'Authorization': f'Token token="{token}"'})
     return session
+
+
+def _normalize_project_id_value(project_id: Union[int, str, Iterable[Union[int, str]], None]) -> Union[int, str, list[Union[int, str]], None]:
+    if project_id is None:
+        return None
+    if isinstance(project_id, (list, tuple, set)):
+        normalized = []
+        for value in project_id:
+            if isinstance(value, str) and value.strip().isdigit():
+                normalized.append(int(value.strip()))
+            else:
+                normalized.append(value)
+        return normalized
+    if isinstance(project_id, str) and project_id.strip().isdigit():
+        return int(project_id.strip())
+    return project_id
+
+
+def _serialize_query_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    return value
+
+
+def _rest_params_from_query(query: dict[str, Any]) -> dict[str, Any]:
+    return {key: _serialize_query_value(value) for key, value in query.items() if value is not None}
+
+
+def _build_observation_query(kind: str,
+                             places: Optional[list[int]],
+                             loc: Optional[tuple[float, float, float]],
+                             project_id: Union[int, str, Iterable[Union[int, str]], None],
+                             taxa_filters: Optional[dict[str, Any]],
+                             d1: Optional[Union[str, dt.date, dt.datetime]],
+                             d2: Optional[Union[str, dt.date, dt.datetime]],
+                             quality_grade: Optional[str],
+                             verifiable: bool,
+                             order_by: str,
+                             order: str) -> dict[str, Any]:
+    assert not (places and loc), "only one of places and loc should be provided"
+
+    query = {
+        **_taxa_for_kind(kind),
+        'project_id': _normalize_project_id_value(project_id),
+        'quality_grade': quality_grade,
+        'verifiable': verifiable,
+        'order_by': order_by,
+        'order': order,
+        'identifications': 'most_activity',
+    }
+    if taxa_filters:
+        query.update({key: value for key, value in taxa_filters.items() if value is not None})
+    if d1 is not None:
+        query['d1'] = d1
+    if d2 is not None:
+        query['d2'] = d2
+
+    if places:
+        query['place_id'] = [int(place_id) for place_id in places]
+    elif isinstance(loc, tuple):
+        if len(loc) != 3:
+            raise ValueError('expected loc triple of lat,long,radius')
+        query.update({'lat': float(loc[0]), 'lng': float(loc[1]), 'radius': float(loc[2])})
+
+    return {key: value for key, value in query.items() if value is not None}
+
+
+def _parse_observation_location(observation: dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
+    geojson = observation.get('geojson') if isinstance(observation.get('geojson'), dict) else None
+    if geojson:
+        coordinates = geojson.get('coordinates')
+        if isinstance(coordinates, (list, tuple)) and len(coordinates) >= 2:
+            try:
+                return float(coordinates[1]), float(coordinates[0])
+            except (TypeError, ValueError):
+                pass
+
+    location = observation.get('location')
+    if isinstance(location, str) and ',' in location:
+        parts = [part.strip() for part in location.split(',', 1)]
+        try:
+            return float(parts[0]), float(parts[1])
+        except (TypeError, ValueError):
+            return None, None
+    return None, None
+
+
+def _extract_observation_photo_url(observation: dict[str, Any], taxon: dict[str, Any]) -> Optional[str]:
+    observation_photos = observation.get('observation_photos') if isinstance(observation.get('observation_photos'), list) else []
+    for item in observation_photos:
+        if not isinstance(item, dict):
+            continue
+        photo = item.get('photo') if isinstance(item.get('photo'), dict) else item
+        photo_url = photo.get('url') if isinstance(photo, dict) else None
+        if photo_url:
+            return str(photo_url).replace('square', 'medium')
+
+    fallback = taxon.get('default_photo') if isinstance(taxon.get('default_photo'), dict) else None
+    fallback_url = fallback.get('medium_url') if isinstance(fallback, dict) else None
+    if fallback_url:
+        return str(fallback_url)
+    return None
+
+
+def _to_iso_timestamp(value: Any) -> Optional[str]:
+    timestamp = pd.to_datetime(value, utc=True, errors='coerce')
+    if pd.isna(timestamp):
+        return None
+    return timestamp.isoformat()
+
+
+def _delay_in_days(observed_value: Any, identified_value: Any) -> Optional[float]:
+    observed = pd.to_datetime(observed_value, utc=True, errors='coerce')
+    identified = pd.to_datetime(identified_value, utc=True, errors='coerce')
+    if pd.isna(observed) or pd.isna(identified):
+        return None
+    return float((identified - observed).total_seconds()) / 86400.0
+
+
+def _identification_time_fields(observation: dict[str, Any]) -> dict[str, Any]:
+    identifications = observation.get('identifications') if isinstance(observation.get('identifications'), list) else []
+    observer = observation.get('user') if isinstance(observation.get('user'), dict) else {}
+    observer_id = observer.get('id')
+    earliest_identification = None
+    earliest_non_owner = None
+    all_identification_timestamps: list[str] = []
+    non_owner_identification_timestamps: list[str] = []
+
+    for identification in identifications:
+        if not isinstance(identification, dict):
+            continue
+        created_at = pd.to_datetime(identification.get('created_at'), utc=True, errors='coerce')
+        if pd.isna(created_at):
+            continue
+        created_iso = created_at.isoformat()
+        all_identification_timestamps.append(created_iso)
+        if earliest_identification is None or created_at < earliest_identification:
+            earliest_identification = created_at
+
+        ident_user = identification.get('user') if isinstance(identification.get('user'), dict) else {}
+        ident_user_id = ident_user.get('id')
+        if identification.get('own_observation') is True:
+            continue
+        if observer_id is not None and ident_user_id == observer_id:
+            continue
+        non_owner_identification_timestamps.append(created_iso)
+        if earliest_non_owner is None or created_at < earliest_non_owner:
+            earliest_non_owner = created_at
+
+    first_identification_at = earliest_identification.isoformat() if earliest_identification is not None else None
+    first_non_owner_identification_at = earliest_non_owner.isoformat() if earliest_non_owner is not None else None
+    return {
+        'all_identification_timestamps': all_identification_timestamps,
+        'non_owner_identification_timestamps': non_owner_identification_timestamps,
+        'all_identification_count': len(all_identification_timestamps),
+        'non_owner_identification_count': len(non_owner_identification_timestamps),
+        'first_identification_at': first_identification_at,
+        'first_non_owner_identification_at': first_non_owner_identification_at,
+        'first_identification_delay_days': _delay_in_days(observation.get('observed_on'), first_identification_at),
+        'first_non_owner_identification_delay_days': _delay_in_days(observation.get('observed_on'), first_non_owner_identification_at),
+    }
+
+
+def _normalize_observation_record(observation: dict[str, Any],
+                                  query_kind: str,
+                                  query_project_id: Union[int, str, Iterable[Union[int, str]], None]) -> dict[str, Any]:
+    taxon = observation.get('taxon') if isinstance(observation.get('taxon'), dict) else {}
+    observer = observation.get('user') if isinstance(observation.get('user'), dict) else {}
+    latitude, longitude = _parse_observation_location(observation)
+    identification_fields = _identification_time_fields(observation)
+
+    observed_on = observation.get('observed_on')
+    if observed_on is None:
+        observed_timestamp = _to_iso_timestamp(observation.get('time_observed_at'))
+        if observed_timestamp:
+            observed_on = observed_timestamp[:10]
+
+    return {
+        'obs_id': observation.get('id'),
+        'observed_on': observed_on,
+        'observed_at': _to_iso_timestamp(observation.get('time_observed_at') or observation.get('observed_on')),
+        'created_at': _to_iso_timestamp(observation.get('created_at')),
+        'quality_grade': observation.get('quality_grade'),
+        'query_kind': (query_kind or 'any').lower().strip() or 'any',
+        'query_project_id': None if query_project_id is None else str(query_project_id),
+        'observer_id': observer.get('id'),
+        'observer_login': observer.get('login'),
+        'taxon_id': taxon.get('id') or observation.get('taxon_id'),
+        'taxon_name': taxon.get('name'),
+        'taxon_preferred_common_name': taxon.get('preferred_common_name'),
+        'taxon_rank': taxon.get('rank'),
+        'iconic_taxon_name': taxon.get('iconic_taxon_name') or observation.get('iconic_taxon_name'),
+        'latitude': latitude,
+        'longitude': longitude,
+        'place_guess': observation.get('place_guess'),
+        'positional_accuracy': observation.get('positional_accuracy'),
+        'identifications_count': observation.get('identifications_count', len(observation.get('identifications', [])) if isinstance(observation.get('identifications'), list) else 0),
+        'all_identification_count': identification_fields['all_identification_count'],
+        'non_owner_identification_count': identification_fields['non_owner_identification_count'],
+        'num_identification_agreements': observation.get('num_identification_agreements'),
+        'num_identification_disagreements': observation.get('num_identification_disagreements'),
+        'all_identification_timestamps': identification_fields['all_identification_timestamps'],
+        'non_owner_identification_timestamps': identification_fields['non_owner_identification_timestamps'],
+        'first_identification_at': identification_fields['first_identification_at'],
+        'first_non_owner_identification_at': identification_fields['first_non_owner_identification_at'],
+        'first_identification_delay_days': identification_fields['first_identification_delay_days'],
+        'first_non_owner_identification_delay_days': identification_fields['first_non_owner_identification_delay_days'],
+        'photo_url': _extract_observation_photo_url(observation, taxon),
+    }
+
+
+def get_observation_rows(kind: str = 'any',
+                         places: Optional[list[int]] = None,
+                         loc: Optional[tuple[float, float, float]] = None,
+                         project_id: Union[int, str, Iterable[Union[int, str]], None] = None,
+                         taxa_filters: Optional[dict[str, Any]] = None,
+                         d1: Optional[Union[str, dt.date, dt.datetime]] = None,
+                         d2: Optional[Union[str, dt.date, dt.datetime]] = None,
+                         quality_grade: Optional[str] = None,
+                         verifiable: bool = True,
+                         per_page: int = 100,
+                         max_pages: int = 10,
+                         order_by: str = 'observed_on',
+                         order: str = 'asc',
+                         token: Optional[str] = None,
+                         session: Optional[requests.Session] = None,
+                         use_cache: bool = True) -> pd.DataFrame:
+    """Fetch observation-level rows for exploratory notebook analyses.
+
+    Parameters mirror a subset of iNaturalist observation filters and return a
+    stable dataframe focused on date, taxon, identification timing, and image
+    fields that are useful for seasonal prevalence and identification-delay
+    analyses.
+    """
+    per_page_value = min(200, max(1, int(per_page)))
+    max_pages_value = max(1, int(max_pages))
+    query = _build_observation_query(
+        kind=kind,
+        places=places,
+        loc=loc,
+        project_id=project_id,
+        taxa_filters=taxa_filters,
+        d1=d1,
+        d2=d2,
+        quality_grade=quality_grade,
+        verifiable=verifiable,
+        order_by=order_by,
+        order=order,
+    )
+    if session is None:
+        session = get_inat_session(token=token, use_cache=use_cache)
+
+    rows = []
+    for page in range(1, max_pages_value + 1):
+        if HAS_PYINAT:
+            payload = inat.get_observations(session=session, page=page, per_page=per_page_value, **query)
+        else:
+            payload = {}
+            params = _rest_params_from_query({**query, 'page': page, 'per_page': per_page_value})
+            response = session.get('https://api.inaturalist.org/v1/observations', params=params, timeout=30)
+            response.raise_for_status()
+            payload = response.json()
+
+        results = payload.get('results', []) if isinstance(payload, dict) else []
+        if not results:
+            break
+        rows.extend(_normalize_observation_record(observation, kind, project_id) for observation in results if isinstance(observation, dict))
+        if len(results) < per_page_value:
+            break
+
+    frame = pd.DataFrame(rows, columns=OBSERVATION_ROW_COLUMNS)
+    if frame.empty:
+        return frame
+
+    for date_col in ['observed_at', 'created_at', 'first_identification_at', 'first_non_owner_identification_at']:
+        frame[date_col] = pd.to_datetime(frame[date_col], utc=True, errors='coerce')
+    frame['observed_on'] = pd.to_datetime(frame['observed_on'], errors='coerce').dt.strftime('%Y-%m-%d')
+    frame['taxon_id'] = pd.to_numeric(frame['taxon_id'], errors='coerce').astype('Int64')
+    frame['observer_id'] = pd.to_numeric(frame['observer_id'], errors='coerce').astype('Int64')
+    frame['identifications_count'] = pd.to_numeric(frame['identifications_count'], errors='coerce').fillna(0).astype(int)
+    frame['all_identification_count'] = pd.to_numeric(frame['all_identification_count'], errors='coerce').fillna(0).astype(int)
+    frame['non_owner_identification_count'] = pd.to_numeric(frame['non_owner_identification_count'], errors='coerce').fillna(0).astype(int)
+    frame['num_identification_agreements'] = pd.to_numeric(frame['num_identification_agreements'], errors='coerce')
+    frame['num_identification_disagreements'] = pd.to_numeric(frame['num_identification_disagreements'], errors='coerce')
+    frame['latitude'] = pd.to_numeric(frame['latitude'], errors='coerce')
+    frame['longitude'] = pd.to_numeric(frame['longitude'], errors='coerce')
+    frame['positional_accuracy'] = pd.to_numeric(frame['positional_accuracy'], errors='coerce')
+    frame['first_identification_delay_days'] = pd.to_numeric(frame['first_identification_delay_days'], errors='coerce')
+    frame['first_non_owner_identification_delay_days'] = pd.to_numeric(frame['first_non_owner_identification_delay_days'], errors='coerce')
+    return frame
+
+
+def annotate_taxon_nativity(observations: pd.DataFrame,
+                            taxon_id_col: str = 'taxon_id',
+                            nativity_place_id: Optional[int] = DEFAULT_NATIVITY_PLACE_ID,
+                            token: Optional[str] = None,
+                            session: Optional[requests.Session] = None,
+                            use_cache: bool = True) -> pd.DataFrame:
+    """Add a nativity label for each taxon represented in ``observations``."""
+    if taxon_id_col not in observations.columns:
+        raise KeyError(f"Missing taxon id column: {taxon_id_col}")
+
+    out = observations.copy()
+    if out.empty:
+        out['nativity'] = pd.Series(dtype='object')
+        return out
+
+    if session is None:
+        session = get_inat_session(token=token, use_cache=use_cache)
+
+    nativity_cache: dict[int, str] = {}
+    labels = []
+    for value in out[taxon_id_col]:
+        if pd.isna(value):
+            labels.append('Unknown')
+            continue
+        taxon_id = int(value)
+        if taxon_id not in nativity_cache:
+            nativity_cache[taxon_id] = _lookup_nativity_via_species_counts(
+                session=session,
+                taxon_id=taxon_id,
+                nativity_place_id=nativity_place_id,
+            )
+        labels.append(nativity_cache[taxon_id])
+    out['nativity'] = labels
+    return out
+
+
+def summarize_time_series(frame: pd.DataFrame,
+                          date_col: str,
+                          freq: str = 'MS',
+                          group_cols: Optional[list[str]] = None,
+                          count_col: Optional[str] = 'obs_id',
+                          count_name: str = 'count',
+                          value_aggs: Optional[dict[str, tuple[str, str]]] = None) -> pd.DataFrame:
+    """Aggregate observation-like rows into a period-based summary table."""
+    if date_col not in frame.columns:
+        raise KeyError(f"Missing date column: {date_col}")
+
+    working = frame.copy()
+    working[date_col] = pd.to_datetime(working[date_col], utc=True, errors='coerce')
+    working = working[working[date_col].notna()].copy()
+
+    group_cols = list(group_cols or [])
+    value_aggs = value_aggs or {}
+    output_columns = ['period_start', *group_cols, count_name, *value_aggs.keys()]
+    if working.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    working['period_start'] = working[date_col].dt.to_period(freq).dt.to_timestamp()
+    named_aggs: dict[str, tuple[str, str]] = {}
+    if count_col and count_col in working.columns:
+        named_aggs[count_name] = (count_col, 'nunique')
+    else:
+        named_aggs[count_name] = (date_col, 'size')
+
+    for output_name, (source_col, agg_func) in value_aggs.items():
+        if source_col not in working.columns:
+            raise KeyError(f"Missing value column: {source_col}")
+        named_aggs[output_name] = (source_col, agg_func)
+
+    summary = working.groupby(['period_start', *group_cols], dropna=False).agg(**named_aggs).reset_index()
+    summary.sort_values(['period_start', *group_cols], inplace=True)
+    return summary[output_columns]
 
 
 def coming_soon(kind: str = 'any',
