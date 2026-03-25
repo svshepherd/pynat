@@ -1,5 +1,17 @@
 {
-  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv",
   "python.terminal.activateEnvironment": true,
-  "python.testing.pytestEnabled": true
+  "python.terminal.activateEnvInCurrentTerminal": true,
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": [
+    "-q"
+  ],
+  "python.venvFolders": [
+    ".venv",
+    "venv"
+  ],
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}"
+  ],
+  "jupyter.notebookFileRoot": "${workspaceFolder}"
 }

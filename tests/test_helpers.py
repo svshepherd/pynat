@@ -213,12 +213,13 @@ def test_lookup_nativity_returns_native_when_present():
         def get(self, url, params=None, timeout=20):
             self.last_params = params
             if params.get('native') == 'true':
-                return FakeResp({'results': [{'taxon.id': 1, 'count': 1}]})
-            return FakeResp({'results': []})
+                return FakeResp({'total_results': 1, 'results': []})
+            return FakeResp({'total_results': 0, 'results': []})
 
     session = FakeSession()
     nativity = h._lookup_nativity_via_species_counts(session=session, taxon_id=1, nativity_place_id=1297)
     assert nativity == 'Native'
+    assert session.last_params.get('per_page') == 0
     assert session.last_params.get('place_id') == 1297
 
 
@@ -237,7 +238,7 @@ def test_lookup_nativity_returns_unknown_when_no_status_found():
 
     class FakeSession:
         def get(self, url, params=None, timeout=20):
-            return FakeResp({'results': []})
+            return FakeResp({'total_results': 0, 'results': []})
 
     session = FakeSession()
     nativity = h._lookup_nativity_via_species_counts(session=session, taxon_id=1)
@@ -363,10 +364,10 @@ def test_lookup_nativity_prefers_introduced_over_native_when_both_present():
     class FakeSession:
         def get(self, url, params=None, timeout=20):
             if params.get('introduced') == 'true':
-                return FakeResp({'results': [{'taxon.id': 1, 'count': 1}]})
+                return FakeResp({'total_results': 1, 'results': []})
             if params.get('native') == 'true':
-                return FakeResp({'results': [{'taxon.id': 1, 'count': 1}]})
-            return FakeResp({'results': []})
+                return FakeResp({'total_results': 1, 'results': []})
+            return FakeResp({'total_results': 0, 'results': []})
 
     session = FakeSession()
     nativity = h._lookup_nativity_via_species_counts(session=session, taxon_id=1, nativity_place_id=1297)
@@ -550,6 +551,40 @@ def test_get_observation_rows_rest_fallback(monkeypatch):
     assert frame.loc[0, 'latitude'] == pytest.approx(37.55)
     assert frame.loc[0, 'longitude'] == pytest.approx(-78.10)
     assert session.calls[0][1]['project_id'] == 'virginia-physiographic-regions-piedmont'
+    # Default observation_fields should be passed as JSON 'fields' param
+    assert 'fields' in session.calls[0][1]
+
+
+def test_get_observation_rows_no_fields_when_none(monkeypatch):
+    """Passing observation_fields=None omits the fields param entirely."""
+    import helpers as h
+
+    class FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {'results': []}
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, params=None, timeout=30):
+            self.calls.append((url, params))
+            return FakeResp()
+
+    monkeypatch.setattr(h, 'HAS_PYINAT', False)
+    session = FakeSession()
+    h.get_observation_rows(
+        kind='any',
+        per_page=10,
+        max_pages=1,
+        observation_fields=None,
+        session=session,
+    )
+
+    assert 'fields' not in session.calls[0][1]
 
 
 def test_annotate_taxon_nativity_reuses_cache(monkeypatch):
