@@ -341,6 +341,75 @@ def _lookup_nativity_via_species_counts(
     return 'Unknown'
 
 
+def _batch_lookup_nativity(
+    session: requests.Session,
+    taxon_ids: list[int],
+    nativity_place_id: Optional[int] = None,
+    chunk_size: int = 100,
+) -> dict[int, str]:
+    """Classify nativity for many taxa in bulk using batched species_counts queries.
+
+    Instead of 3 API calls per taxon, this issues 3 calls per *chunk* (one per
+    establishment status: endemic, introduced, native).  For *N* unique taxa the
+    call count drops from 3·N worst-case to 3·ceil(N/chunk_size).
+    """
+    if not taxon_ids:
+        return {}
+
+    endpoint = 'https://api.inaturalist.org/v1/observations/species_counts'
+    status_order = [('endemic', 'Endemic'), ('introduced', 'Introduced'), ('native', 'Native')]
+    result: dict[int, str] = {}
+
+    for i in range(0, len(taxon_ids), chunk_size):
+        chunk = taxon_ids[i:i + chunk_size]
+        unresolved = set(chunk)
+        base: dict[str, Any] = {
+            'taxon_id': ','.join(str(t) for t in chunk),
+            'verifiable': 'true',
+            'per_page': 0,
+        }
+        if nativity_place_id is not None:
+            base['place_id'] = int(nativity_place_id)
+
+        for key, label in status_order:
+            if not unresolved:
+                break
+            # Narrow to unresolved taxa only to reduce noise.
+            params = {
+                **base,
+                'taxon_id': ','.join(str(t) for t in unresolved),
+                key: 'true',
+            }
+            try:
+                response = session.get(endpoint, params=params, timeout=20)
+                response.raise_for_status()
+                payload = response.json()
+                # per_page=0 means results list is empty, but total_results > 0
+                # tells us *at least one* taxon in the set has this status.
+                if payload.get('total_results', 0) == 0:
+                    continue
+                # Re-query with per_page large enough to get taxon IDs back
+                detail_params = {**params, 'per_page': len(unresolved)}
+                detail_resp = session.get(endpoint, params=detail_params, timeout=20)
+                detail_resp.raise_for_status()
+                for rec in detail_resp.json().get('results', []):
+                    tid = rec.get('taxon', {}).get('id') if isinstance(rec.get('taxon'), dict) else rec.get('taxon.id')
+                    if tid is not None:
+                        tid = int(tid)
+                        if tid in unresolved:
+                            result[tid] = label
+                            unresolved.discard(tid)
+            except Exception as e:
+                logger.debug('Batch nativity lookup failed for chunk (%s): %s', key, e)
+                continue
+
+        # Anything left is unknown
+        for tid in unresolved:
+            result[tid] = 'Unknown'
+
+    return result
+
+
 def _format_photo_title(common_name: str, scientific_name: str, nativity: str) -> str:
     return f"{common_name}\n{scientific_name}\nNativity: {nativity}"
 
@@ -803,15 +872,43 @@ def get_observation_rows(kind: str = 'any',
     resolved_fields = OBSERVATION_FIELDS_MINIMAL if observation_fields == 'default' else observation_fields
     fields_json = json.dumps(resolved_fields) if resolved_fields is not None else None
 
+    obs_url = 'https://api.inaturalist.org/v1/observations'
+
+    # Preflight: per_page=0 count check to size pagination and warn on truncation
+    preflight_params = _rest_params_from_query({**query, 'per_page': 0})
+    try:
+        preflight_resp = session.get(obs_url, params=preflight_params, timeout=30)
+        preflight_resp.raise_for_status()
+        total_results = preflight_resp.json().get('total_results', None)
+    except Exception:
+        total_results = None
+
+    if total_results is not None:
+        import math
+        pages_needed = math.ceil(total_results / per_page_value) if total_results > 0 else 0
+        actual_pages = min(max_pages_value, pages_needed)
+        if pages_needed > max_pages_value:
+            fetchable = max_pages_value * per_page_value
+            logger.warning(
+                'Truncation: %d observations in scope but only %d fetchable '
+                '(%d pages x %d/page). Increase max_pages to %d to capture all.',
+                total_results, fetchable, max_pages_value, per_page_value, pages_needed,
+            )
+    else:
+        actual_pages = max_pages_value
+
+    if total_results == 0:
+        return pd.DataFrame(columns=OBSERVATION_ROW_COLUMNS)
+
     rows = []
-    for page in range(1, max_pages_value + 1):
+    for page in range(1, actual_pages + 1):
         # Always use REST API for paginated queries since pyinaturalist's get_observations
         # doesn't support manual pagination with page parameter.
         payload = {}
         params = _rest_params_from_query({**query, 'page': page, 'per_page': per_page_value})
         if fields_json is not None:
             params['fields'] = fields_json
-        response = session.get('https://api.inaturalist.org/v1/observations', params=params, timeout=30)
+        response = session.get(obs_url, params=params, timeout=30)
         response.raise_for_status()
         payload = response.json()
 
@@ -862,20 +959,20 @@ def annotate_taxon_nativity(observations: pd.DataFrame,
     if session is None:
         session = get_inat_session(token=token, use_cache=use_cache)
 
-    nativity_cache: dict[int, str] = {}
+    unique_ids = [
+        int(v) for v in out[taxon_id_col].dropna().unique()
+    ]
+    nativity_cache = _batch_lookup_nativity(
+        session=session,
+        taxon_ids=unique_ids,
+        nativity_place_id=nativity_place_id,
+    )
     labels = []
     for value in out[taxon_id_col]:
         if pd.isna(value):
             labels.append('Unknown')
-            continue
-        taxon_id = int(value)
-        if taxon_id not in nativity_cache:
-            nativity_cache[taxon_id] = _lookup_nativity_via_species_counts(
-                session=session,
-                taxon_id=taxon_id,
-                nativity_place_id=nativity_place_id,
-            )
-        labels.append(nativity_cache[taxon_id])
+        else:
+            labels.append(nativity_cache.get(int(value), 'Unknown'))
     out['nativity'] = labels
     return out
 

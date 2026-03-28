@@ -1,4 +1,13 @@
--r ../requirements.txt
+# Minimal set for the coming_soon_near_you.ipynb Voilà app.
+# The full project requirements.txt includes extras (pyarrow, ipyplot,
+# jupyterlab, etc.) that this notebook never imports.
+dill>=0.3.8
+matplotlib>=3.9
+numpy>=1.26
+pandas>=2.2
+requests>=2.32
+requests-cache>=1.2
+requests-ratelimiter<0.9
+tqdm>=4.66
 ipywidgets>=8.1,<9
 voila>=0.5,<1
-jupyterlab>=4,<5

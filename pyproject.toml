@@ -29,6 +29,9 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.11",
 ]
+streamlit = [
+  "streamlit>=1.30",
+]
 
 [tool.uv]
 package = false

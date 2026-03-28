@@ -459,9 +459,11 @@ def test_get_observation_rows_pyinat(monkeypatch):
                 def raise_for_status(self):
                     return None
 
-                def json(self):
-                    # Return results on first call (page 1), empty on subsequent
+                def json(self_inner):
+                    # Call 1 is preflight (per_page=0), call 2 is data page 1
                     if self.call_count == 1:
+                        return {'total_results': 1, 'results': []}
+                    if self.call_count == 2:
                         return {'results': [test_observation], 'total_results': 1}
                     return {'results': []}
             
@@ -531,6 +533,8 @@ def test_get_observation_rows_rest_fallback(monkeypatch):
 
         def get(self, url, params=None, timeout=30):
             self.calls.append((url, params))
+            if params.get('per_page') == 0:
+                return FakeResp({'total_results': 1, 'results': []})
             return FakeResp()
 
     monkeypatch.setattr(h, 'HAS_PYINAT', False)
@@ -550,9 +554,10 @@ def test_get_observation_rows_rest_fallback(monkeypatch):
     assert frame.loc[0, 'all_identification_timestamps'] == []
     assert frame.loc[0, 'latitude'] == pytest.approx(37.55)
     assert frame.loc[0, 'longitude'] == pytest.approx(-78.10)
-    assert session.calls[0][1]['project_id'] == 'virginia-physiographic-regions-piedmont'
+    # calls[0] is preflight (per_page=0), calls[1] is data page
+    assert session.calls[1][1]['project_id'] == 'virginia-physiographic-regions-piedmont'
     # Default observation_fields should be passed as JSON 'fields' param
-    assert 'fields' in session.calls[0][1]
+    assert 'fields' in session.calls[1][1]
 
 
 def test_get_observation_rows_no_fields_when_none(monkeypatch):
@@ -584,7 +589,12 @@ def test_get_observation_rows_no_fields_when_none(monkeypatch):
         session=session,
     )
 
-    assert 'fields' not in session.calls[0][1]
+    # calls[0] is preflight (per_page=0), calls[1] would be data page if any results
+    # With 0 total_results from preflight, there's only the preflight call
+    # Preflight never includes 'fields', data calls should also omit it
+    for _, params in session.calls:
+        if params.get('per_page', 0) != 0:
+            assert 'fields' not in params
 
 
 def test_annotate_taxon_nativity_reuses_cache(monkeypatch):
@@ -592,17 +602,19 @@ def test_annotate_taxon_nativity_reuses_cache(monkeypatch):
 
     calls = []
 
-    def fake_lookup(session, taxon_id, nativity_place_id=None):
-        calls.append((taxon_id, nativity_place_id))
-        return 'Native'
+    def fake_batch_lookup(session, taxon_ids, nativity_place_id=None, chunk_size=100):
+        calls.append((sorted(taxon_ids), nativity_place_id))
+        return {tid: 'Native' for tid in taxon_ids}
 
-    monkeypatch.setattr(h, '_lookup_nativity_via_species_counts', fake_lookup)
+    monkeypatch.setattr(h, '_batch_lookup_nativity', fake_batch_lookup)
 
     frame = pd.DataFrame({'taxon_id': [1, 1, 2, None]})
     out = h.annotate_taxon_nativity(frame, nativity_place_id=1297, session=object())
 
     assert out['nativity'].tolist() == ['Native', 'Native', 'Native', 'Unknown']
-    assert calls == [(1, 1297), (2, 1297)]
+    # Should be called once with both unique taxon IDs
+    assert len(calls) == 1
+    assert calls[0] == ([1, 2], 1297)
 
 
 def test_summarize_time_series_counts_and_means():
@@ -628,4 +640,157 @@ def test_summarize_time_series_counts_and_means():
     insect_row = summary[summary['iconic_taxon_name'] == 'Insecta'].iloc[0]
     assert insect_row['count'] == 2
     assert insect_row['mean_delay_days'] == pytest.approx(3.0)
+
+
+def test_batch_lookup_nativity_classifies_in_bulk():
+    import helpers as h
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def __init__(self):
+            self.call_count = 0
+
+        def get(self, url, params=None, timeout=20):
+            self.call_count += 1
+            status_key = None
+            for k in ('endemic', 'introduced', 'native'):
+                if params.get(k) == 'true':
+                    status_key = k
+                    break
+            per_page = params.get('per_page', 0)
+
+            if status_key == 'endemic':
+                if per_page == 0:
+                    return FakeResp({'total_results': 0, 'results': []})
+                return FakeResp({'total_results': 0, 'results': []})
+
+            if status_key == 'introduced':
+                if per_page == 0:
+                    return FakeResp({'total_results': 1, 'results': []})
+                return FakeResp({'total_results': 1, 'results': [
+                    {'taxon': {'id': 2}, 'count': 5},
+                ]})
+
+            if status_key == 'native':
+                if per_page == 0:
+                    return FakeResp({'total_results': 1, 'results': []})
+                return FakeResp({'total_results': 1, 'results': [
+                    {'taxon': {'id': 1}, 'count': 10},
+                ]})
+
+            return FakeResp({'total_results': 0, 'results': []})
+
+    session = FakeSession()
+    result = h._batch_lookup_nativity(session, [1, 2, 3], nativity_place_id=1297)
+
+    assert result[1] == 'Native'
+    assert result[2] == 'Introduced'
+    assert result[3] == 'Unknown'
+    # 3 per_page=0 probes + 2 detail fetches (introduced hit, native hit),
+    # endemic hit had total_results=0 so no detail fetch
+    assert session.call_count == 5
+
+
+def test_batch_lookup_nativity_empty_list():
+    import helpers as h
+    result = h._batch_lookup_nativity(object(), [])
+    assert result == {}
+
+
+def test_get_observation_rows_preflight_limits_pages(monkeypatch):
+    """Preflight per_page=0 check should limit actual pages fetched."""
+    import helpers as h
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    observation = {
+        'id': 1,
+        'observed_on': '2026-03-01',
+        'created_at': '2026-03-01T10:00:00Z',
+        'quality_grade': 'research',
+        'user': {'id': 1, 'login': 'u'},
+        'taxon': {'id': 1, 'name': 'T', 'preferred_common_name': 'T', 'rank': 'species'},
+        'identifications': [],
+    }
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, params=None, timeout=30):
+            self.calls.append(params)
+            per_page = params.get('per_page', 0)
+            if per_page == 0:
+                # Preflight: 15 total results
+                return FakeResp({'total_results': 15, 'results': []})
+            # Data pages: return full page of results each time
+            return FakeResp({'results': [observation] * per_page})
+
+    monkeypatch.setattr(h, 'HAS_PYINAT', False)
+    session = FakeSession()
+    frame = h.get_observation_rows(
+        kind='any',
+        per_page=10,
+        max_pages=5,
+        session=session,
+    )
+
+    # 15 results / 10 per_page = 2 pages needed; max_pages=5 should be clamped to 2
+    data_calls = [c for c in session.calls if c.get('per_page', 0) != 0]
+    assert len(data_calls) == 2
+    assert len(frame) == 20  # 10 per page * 2 pages
+
+
+def test_get_observation_rows_preflight_zero_results(monkeypatch):
+    """When preflight says 0 results, return empty immediately without data calls."""
+    import helpers as h
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, params=None, timeout=30):
+            self.calls.append(params)
+            return FakeResp({'total_results': 0, 'results': []})
+
+    monkeypatch.setattr(h, 'HAS_PYINAT', False)
+    session = FakeSession()
+    frame = h.get_observation_rows(
+        kind='any',
+        per_page=10,
+        max_pages=5,
+        session=session,
+    )
+
+    assert frame.empty
+    # Only the preflight call, no data calls
+    assert len(session.calls) == 1
+    assert session.calls[0].get('per_page') == 0
 
