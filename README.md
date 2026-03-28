@@ -20,22 +20,11 @@ Notes:
 - The project uses `uv` for environment and dependency management.
 - `pytest` lives in the `dev` extra, so include `--extra dev` for test commands.
 
-## Public notebook entrypoint (Binder)
+## Public notebook entrypoint
 
-Public Binder scope: `coming_soon_near_you.ipynb`.
+Try out `https://coming-soon-near-you.streamlit.app/`. I'm very happy with the interface here.
 
 Exploratory notebooks are under `notebooks/exploratory/` and are not treated as stable public entrypoints.
-
-- Binder (JupyterLab):
-	https://mybinder.org/v2/gh/svshepherd/pynat/main?urlpath=lab/tree/coming_soon_near_you.ipynb
-- Binder (classic fallback):
-	https://mybinder.org/v2/gh/svshepherd/pynat/main?filepath=coming_soon_near_you.ipynb
-- Voila render (code hidden):
-	https://mybinder.org/v2/gh/svshepherd/pynat/main?urlpath=voila/render/coming_soon_near_you.ipynb
-
-Binder tips:
-- Cold starts can take a few minutes.
-- For reproducible demos, replace `main` in URLs with a release tag.
 
 ## Authentication and secrets
 
