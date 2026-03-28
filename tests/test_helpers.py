@@ -323,6 +323,72 @@ def test_coming_soon_lineage_filter_native_endemic(monkeypatch):
     assert set(res['taxon.id'].astype(int).tolist()) == {1}
 
 
+def test_coming_soon_lineage_filter_native_keeps_unknown(monkeypatch):
+    """Taxa with Unknown nativity should be kept under native_endemic filter."""
+    import helpers as h
+
+    def fake_counts(**kwargs):
+        if "month" in kwargs or "day" in kwargs:
+            return {"results": [
+                {
+                    "taxon.id": 1,
+                    "taxon.name": "Native specimen",
+                    "taxon.preferred_common_name": "Native",
+                    "taxon.wikipedia_url": "https://example.org/wiki/native",
+                    "taxon.default_photo.medium_url": "https://example.org/native.jpg",
+                    "count": 5,
+                },
+                {
+                    "taxon.id": 2,
+                    "taxon.name": "Unknown specimen",
+                    "taxon.preferred_common_name": "Mystery",
+                    "taxon.wikipedia_url": "https://example.org/wiki/mystery",
+                    "taxon.default_photo.medium_url": "https://example.org/mystery.jpg",
+                    "count": 3,
+                },
+                {
+                    "taxon.id": 3,
+                    "taxon.name": "Introduced specimen",
+                    "taxon.preferred_common_name": "Introduced",
+                    "taxon.wikipedia_url": "https://example.org/wiki/introduced",
+                    "taxon.default_photo.medium_url": "https://example.org/introduced.jpg",
+                    "count": 5,
+                },
+            ]}
+        return {"results": []}
+
+    def fake_nativity(session, taxon_id, nativity_place_id=None):
+        mapping = {1: "Native", 2: "Unknown", 3: "Introduced"}
+        return mapping.get(int(taxon_id), "Unknown")
+
+    if not h.HAS_PYINAT:
+        pytest.skip("pyinaturalist not installed; this test covers pyinaturalist path")
+
+    monkeypatch.setattr(h.inat, "get_observation_species_counts", fake_counts)
+    monkeypatch.setattr(h, "_lookup_nativity_via_species_counts", fake_nativity)
+
+    res = h.coming_soon(loc=(0, 0, 1), limit=10, lineage_filter='native_endemic', nativity_place_id=1297)
+    assert not res.empty
+    # Native + Unknown kept; Introduced dropped
+    assert set(res['taxon.id'].astype(int).tolist()) == {1, 2}
+
+
+def test_taxa_for_kind_plants_uses_taxon_id():
+    import helpers as h
+
+    taxa = h._taxa_for_kind('plants')
+    assert taxa == {'taxon_id': 47126}
+
+
+def test_taxa_for_kind_flowers_includes_taxon_id():
+    import helpers as h
+
+    taxa = h._taxa_for_kind('flowers')
+    assert taxa['taxon_id'] == 47126
+    assert 'term_id' in taxa
+    assert 'term_value_id' in taxa
+
+
 def test_resolve_nativity_place_id_auto_from_places():
     import helpers as h
 

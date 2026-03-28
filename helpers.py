@@ -185,11 +185,11 @@ def _taxa_for_kind(kind: str) -> dict:
     if normalized_kind == 'any':
         return {}
     if normalized_kind == 'plants':
-        return {'taxon_name': 'plants'}
+        return {'taxon_id': 47126}
     if normalized_kind == 'flowers':
-        return {'term_id': 12, 'term_value_id': 13}
+        return {'taxon_id': 47126, 'term_id': 12, 'term_value_id': 13}
     if normalized_kind == 'fruits':
-        return {'term_id': 12, 'term_value_id': 14}
+        return {'taxon_id': 47126, 'term_id': 12, 'term_value_id': 14}
     if normalized_kind == 'mushrooms':
         return {'taxon_id': 47170}
     if normalized_kind == 'animals':
@@ -1274,7 +1274,10 @@ def coming_soon(kind: str = 'any',
         if lineage_filter == 'introduced':
             results = results[results['nativity'] == 'Introduced']
         else:
-            results = results[results['nativity'].isin(['Native', 'Endemic'])]
+            # Keep native, endemic, AND unknown (taxa without establishment
+            # records shouldn't be silently dropped — only confirmed
+            # introduced taxa are excluded).
+            results = results[results['nativity'] != 'Introduced']
 
     # Display species names and their main images
     for index, row in results.head(capped_limit).iterrows():
