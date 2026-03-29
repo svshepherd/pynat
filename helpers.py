@@ -1279,6 +1279,56 @@ def summarize_time_series(frame: pd.DataFrame,
     return summary[output_columns]
 
 
+def _find_state_place_id(
+    session: requests.Session,
+    places: Optional[list[int]],
+    loc: Optional[tuple[float, float, float]],
+) -> Optional[int]:
+    """Return the state/province-level iNaturalist place ID for a query context.
+
+    Used as the fallback scope for nativity re-checks when too many taxa come
+    back Unknown from a more specific place.  State-level records in iNaturalist
+    are typically the most complete for establishment-means data.
+
+    For coordinate queries (``loc`` is set), geocodes the centre point via
+    :func:`_derive_place_id_from_location`, which already prefers
+    ``admin_level == 10`` (state/province).
+
+    For place-ID queries (``places`` is set), fetches the place's own
+    ``admin_level`` and returns it directly if it is already a state.
+    Otherwise walks up the ancestor hierarchy via
+    :func:`_get_ancestor_place_ids` and returns the broadest ancestor that
+    still passes the ``admin_level >= 10`` filter — which is the state.
+
+    Returns ``None`` when no state-level place can be identified.
+    """
+    if places:
+        pid = int(places[0])
+        # Check whether the query place itself is already a state.
+        endpoint = f'https://api.inaturalist.org/v1/places/{pid}'
+        try:
+            resp = session.get(endpoint, timeout=12)
+            resp.raise_for_status()
+            results = resp.json().get('results', [])
+            if results and isinstance(results[0], dict):
+                if results[0].get('admin_level') == 10:
+                    return pid
+        except Exception as e:
+            logger.debug('Could not check admin_level for place %s: %s', pid, e)
+
+        # Walk ancestors filtered to admin_level >= 10 (most-specific first).
+        # The broadest entry in this filtered list is the state.
+        ancestors = _get_ancestor_place_ids(session, pid, max_admin_level=10)
+        if ancestors:
+            return ancestors[-1]
+        return None
+
+    if loc is not None:
+        return _derive_place_id_from_location(session, float(loc[0]), float(loc[1]))
+
+    return None
+
+
 def coming_soon(kind: str = 'any',
                 places: list[int] = None,
                 loc: tuple[float, float, float] = None,
@@ -1292,6 +1342,7 @@ def coming_soon(kind: str = 'any',
                 use_cache: bool = True,
                 lineage_filter: str = 'any',
                 nativity_place_id: Union[int, str, None] = 'auto',
+                unknown_retry_threshold: float = 0.5,
                 ) -> pd.DataFrame:
     """Return nearby seasonal/common taxa, optionally normalized.
 
@@ -1319,6 +1370,11 @@ def coming_soon(kind: str = 'any',
         Optional place scope used when inferring nativity. Use ``'auto'``
         (default) to derive region from query context, an integer place ID
         (e.g. ``1297`` for Virginia), or ``None`` for global nativity checks.
+    unknown_retry_threshold:
+        Fraction of result taxa that must be ``'Unknown'`` (0–1) to trigger a
+        second nativity pass at the state/province level.  Default ``0.5``
+        retries when half or more of the taxa are unclassified.  Set to
+        ``1.0`` to disable the retry, or ``0.0`` to always retry.
 
     Returns
     -------
@@ -1558,6 +1614,45 @@ def coming_soon(kind: str = 'any',
             label, resolved_pid = nativity_cache[cache_key]
             results.at[idx, 'nativity'] = label
             results.at[idx, 'nativity_place_id'] = resolved_pid
+
+        # --- State-level retry for taxa that came back Unknown ---------------
+        # If many results are Unknown it often means the initial place is too
+        # specific (e.g. a county park) and the per-taxon ancestor crawl in
+        # _lookup_nativity_via_species_counts silently failed for some entries.
+        # Re-try just those taxa using the state/province place ID, which has
+        # the most complete iNaturalist establishment-means records.
+        unknown_indices = [
+            idx for idx in results.index
+            if results.at[idx, 'nativity'] == 'Unknown'
+            and pd.notna(results.at[idx, 'taxon.id'])
+        ]
+        unknown_fraction = len(unknown_indices) / len(results) if len(results) > 0 else 0.0
+        if unknown_indices and unknown_fraction >= unknown_retry_threshold:
+            state_pid = _find_state_place_id(session=session, places=places, loc=loc)
+            if state_pid is not None and state_pid != resolved_nativity_place_id:
+                logger.info(
+                    'Retrying nativity for %d Unknown taxa at state-level place %s '
+                    '(%.0f%% unknown exceeded threshold %.0f%%)',
+                    len(unknown_indices), state_pid,
+                    unknown_fraction * 100, unknown_retry_threshold * 100,
+                )
+                for idx in unknown_indices:
+                    cache_key = int(results.at[idx, 'taxon.id'])
+                    # Always re-query; don't reuse the prior Unknown cache entry.
+                    label, resolved_pid = _lookup_nativity_via_species_counts(
+                        session=session,
+                        taxon_id=cache_key,
+                        nativity_place_id=state_pid,
+                    )
+                    nativity_cache[cache_key] = (label, resolved_pid)
+                    results.at[idx, 'nativity'] = label
+                    results.at[idx, 'nativity_place_id'] = resolved_pid
+            elif state_pid == resolved_nativity_place_id:
+                logger.debug(
+                    'State-level retry skipped: resolved nativity place %s is already state-level.',
+                    resolved_nativity_place_id,
+                )
+        # ---------------------------------------------------------------------
 
         if lineage_filter == 'introduced':
             results = results[results['nativity'] == 'Introduced']
