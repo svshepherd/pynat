@@ -13,7 +13,6 @@ from helpers import (
     load_api_key,
     _compute_location_from_values,
     _lookup_place_name,
-    _nativity_value,
     _search_places,
 )
 
@@ -83,22 +82,6 @@ lineage_filter = st.sidebar.selectbox(
     "Lineage filter", LINEAGE_OPTIONS, index=LINEAGE_OPTIONS.index("native_endemic"),
 )
 
-nativity_mode = st.sidebar.selectbox(
-    "Nativity reference",
-    ["auto", "Use Place ID", "none"],
-)
-nativity_place_id_input = None
-if nativity_mode == "Use Place ID":
-    nativity_place_id_input = st.sidebar.number_input(
-        "Nativity Place ID", min_value=1, value=1297, step=1,
-    )
-    nat_place_name = _lookup_place_name(session, int(nativity_place_id_input))
-    if nat_place_name:
-        st.sidebar.caption(f"📍 {nat_place_name}")
-
-nativity_mode_key = {"auto": "auto", "Use Place ID": "id", "none": "none"}[nativity_mode]
-nativity_val = _nativity_value(nativity_mode_key, nativity_place_id_input)
-
 limit = st.sidebar.slider("Species limit", min_value=1, max_value=25, value=7)
 show_images = st.sidebar.checkbox("Show images", value=True)
 
@@ -108,7 +91,7 @@ show_images = st.sidebar.checkbox("Show images", value=True)
 
 
 @st.cache_data(ttl=3600, show_spinner="Querying iNaturalist...")
-def _run_query(_session, kind, location_key, norm, limit, lineage_filter, nativity_val):
+def _run_query(_session, kind, location_key, norm, limit, lineage_filter):
     """Cached wrapper around coming_soon().
 
     ``location_key`` is a hashable tuple for cache keying; real kwargs are
@@ -129,7 +112,7 @@ def _run_query(_session, kind, location_key, norm, limit, lineage_filter, nativi
         fetch_images=False,
         use_cache=True,
         lineage_filter=lineage_filter,
-        nativity_place_id=nativity_val,
+        nativity_place_id='auto',
         session=_session,
     )
 
@@ -154,7 +137,6 @@ if st.session_state.get("run"):
             norm,
             limit,
             lineage_filter,
-            nativity_val,
         )
     except Exception as exc:
         st.error(f"Query failed: {exc}")
