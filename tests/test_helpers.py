@@ -217,8 +217,9 @@ def test_lookup_nativity_returns_native_when_present():
             return FakeResp({'total_results': 0, 'results': []})
 
     session = FakeSession()
-    nativity = h._lookup_nativity_via_species_counts(session=session, taxon_id=1, nativity_place_id=1297)
-    assert nativity == 'Native'
+    label, resolved_pid = h._lookup_nativity_via_species_counts(session=session, taxon_id=1, nativity_place_id=1297)
+    assert label == 'Native'
+    assert resolved_pid == 1297
     assert session.last_params.get('per_page') == 0
     assert session.last_params.get('place_id') == 1297
 
@@ -241,8 +242,9 @@ def test_lookup_nativity_returns_unknown_when_no_status_found():
             return FakeResp({'total_results': 0, 'results': []})
 
     session = FakeSession()
-    nativity = h._lookup_nativity_via_species_counts(session=session, taxon_id=1)
-    assert nativity == 'Unknown'
+    label, resolved_pid = h._lookup_nativity_via_species_counts(session=session, taxon_id=1)
+    assert label == 'Unknown'
+    assert resolved_pid is None
 
 
 def test_coming_soon_lineage_filter_introduced(monkeypatch):
@@ -271,7 +273,8 @@ def test_coming_soon_lineage_filter_introduced(monkeypatch):
         return {"results": []}
 
     def fake_nativity(session, taxon_id, nativity_place_id=None):
-        return "Introduced" if int(taxon_id) == 2 else "Native"
+        label = "Introduced" if int(taxon_id) == 2 else "Native"
+        return (label, nativity_place_id)
 
     if not h.HAS_PYINAT:
         pytest.skip("pyinaturalist not installed; this test covers pyinaturalist path")
@@ -310,7 +313,8 @@ def test_coming_soon_lineage_filter_native_endemic(monkeypatch):
         return {"results": []}
 
     def fake_nativity(session, taxon_id, nativity_place_id=None):
-        return "Introduced" if int(taxon_id) == 2 else "Native"
+        label = "Introduced" if int(taxon_id) == 2 else "Native"
+        return (label, nativity_place_id)
 
     if not h.HAS_PYINAT:
         pytest.skip("pyinaturalist not installed; this test covers pyinaturalist path")
@@ -359,7 +363,7 @@ def test_coming_soon_lineage_filter_native_keeps_unknown(monkeypatch):
 
     def fake_nativity(session, taxon_id, nativity_place_id=None):
         mapping = {1: "Native", 2: "Unknown", 3: "Introduced"}
-        return mapping.get(int(taxon_id), "Unknown")
+        return (mapping.get(int(taxon_id), "Unknown"), nativity_place_id)
 
     if not h.HAS_PYINAT:
         pytest.skip("pyinaturalist not installed; this test covers pyinaturalist path")
@@ -436,8 +440,9 @@ def test_lookup_nativity_prefers_introduced_over_native_when_both_present():
             return FakeResp({'total_results': 0, 'results': []})
 
     session = FakeSession()
-    nativity = h._lookup_nativity_via_species_counts(session=session, taxon_id=1, nativity_place_id=1297)
-    assert nativity == 'Introduced'
+    label, resolved_pid = h._lookup_nativity_via_species_counts(session=session, taxon_id=1, nativity_place_id=1297)
+    assert label == 'Introduced'
+    assert resolved_pid == 1297
 
 
 def test_coming_soon_accepts_places_list(monkeypatch):
@@ -911,4 +916,65 @@ def test_search_places_api_error_returns_empty():
 
     results = h._search_places(BrokenSession(), 'Virginia')
     assert results == []
+
+
+def test_lookup_nativity_crawls_to_parent_when_unknown_at_primary():
+    """When primary place returns no status, should resolve via ancestor."""
+    import helpers as h
+
+    PARK_ID = 9999
+    STATE_ID = 1297
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def get(self, url, params=None, timeout=20):
+            # Places lookup for ancestor IDs
+            if f'/places/{PARK_ID}' in url:
+                return FakeResp({'results': [{'ancestor_place_ids': [1, STATE_ID]}]})
+            # species_counts: only return native at state level
+            if params and params.get('place_id') == STATE_ID and params.get('native') == 'true':
+                return FakeResp({'total_results': 1, 'results': []})
+            return FakeResp({'total_results': 0, 'results': []})
+
+    label, resolved_pid = h._lookup_nativity_via_species_counts(
+        session=FakeSession(), taxon_id=42, nativity_place_id=PARK_ID
+    )
+    assert label == 'Native'
+    assert resolved_pid == STATE_ID
+
+
+def test_lookup_nativity_ancestor_crawl_exhausted_returns_unknown():
+    """Should return Unknown when no ancestor resolves the status."""
+    import helpers as h
+
+    class FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {'total_results': 0, 'results': []}
+
+    class FakeSession:
+        def get(self, url, params=None, timeout=20):
+            if '/places/' in url:
+                return type('R', (), {
+                    'raise_for_status': lambda self: None,
+                    'json': lambda self: {'results': [{'ancestor_place_ids': [10, 20]}]},
+                })()
+            return FakeResp()
+
+    label, resolved_pid = h._lookup_nativity_via_species_counts(
+        session=FakeSession(), taxon_id=42, nativity_place_id=999
+    )
+    assert label == 'Unknown'
+    assert resolved_pid is None
 

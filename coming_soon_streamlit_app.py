@@ -198,12 +198,32 @@ if st.session_state.get("run"):
                     ):
                         label = f"[{common or scientific}]({wiki_url})"
                     st.markdown(label)
-                    st.caption(f"*{scientific}* · {count} obs")
+                    nativity = row.get("nativity") or ""
+                    nativity_icon = {
+                        "Native": "🟢",
+                        "Endemic": "🔵",
+                        "Introduced": "🔴",
+                        "Unknown": "⬜",
+                    }.get(nativity, "")
+                    if nativity:
+                        nat_pid = row.get("nativity_place_id")
+                        nat_place = (
+                            _lookup_place_name(session, int(nat_pid))
+                            if nat_pid is not None and not pd.isna(nat_pid)
+                            else None
+                        )
+                        scope = f" ({nat_place})" if nat_place else ""
+                        nativity_str = f" · {nativity_icon} {nativity}{scope}"
+                    else:
+                        nativity_str = ""
+                    st.caption(f"*{scientific}* · {count} obs{nativity_str}")
     else:
         show_cols = [
             "count",
             "taxon.name",
             "taxon.preferred_common_name",
+            "nativity",
+            "nativity_place_id",
             "taxon.wikipedia_url",
         ]
         safe_cols = [c for c in show_cols if c in res.columns]

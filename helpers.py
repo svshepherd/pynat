@@ -133,9 +133,11 @@ def _derive_place_id_from_location(
     session: requests.Session,
     lat: float,
     lng: float,
-    fallback_place_id: int = DEFAULT_NATIVITY_PLACE_ID,
-) -> int:
-    """Derive a regional place id from coordinates (prefer state/province)."""
+) -> Optional[int]:
+    """Derive a regional place id from coordinates (prefer state/province).
+
+    Returns ``None`` when geocoding fails so callers can fall back gracefully.
+    """
     endpoint = 'https://api.inaturalist.org/v1/places/nearby'
     try:
         response = session.get(endpoint, params={'lat': lat, 'lng': lng, 'per_page': 30}, timeout=20)
@@ -143,7 +145,7 @@ def _derive_place_id_from_location(
         nearby = response.json().get('results', [])
     except Exception as e:
         logger.debug('Failed to derive nativity place from location (%s,%s): %s', lat, lng, e)
-        return int(fallback_place_id)
+        return None
 
     normalized = []
     for item in nearby:
@@ -159,7 +161,7 @@ def _derive_place_id_from_location(
 
     if normalized:
         return int(normalized[0]['id'])
-    return int(fallback_place_id)
+    return None
 
 
 def _resolve_nativity_place_id(
@@ -181,9 +183,38 @@ def _resolve_nativity_place_id(
             return int(places[0])
         if isinstance(loc, tuple) and len(loc) == 3:
             return _derive_place_id_from_location(session=session, lat=float(loc[0]), lng=float(loc[1]))
-        return int(DEFAULT_NATIVITY_PLACE_ID)
+        # No location context — return None (global scope); the ancestor crawl
+        # in _lookup_nativity_via_species_counts handles regional resolution.
+        return None
 
     return int(nativity_place_id)
+
+
+def _get_ancestor_place_ids(
+    session: requests.Session,
+    place_id: int,
+) -> list[int]:
+    """Return ancestor place IDs for a place, ordered from most-specific to broadest.
+
+    Uses the ``ancestor_place_ids`` field from ``/v1/places/{id}``.  The API
+    returns ancestors broadest-first; this function reverses that so callers can
+    crawl outward naturally (county → state → country → …).
+    Returns an empty list on any error.
+    """
+    endpoint = f'https://api.inaturalist.org/v1/places/{int(place_id)}'
+    session_to_use = session or requests.Session()
+    try:
+        response = session_to_use.get(endpoint, timeout=12)
+        response.raise_for_status()
+        results = response.json().get('results', [])
+        if not results:
+            return []
+        place = results[0] if isinstance(results[0], dict) else {}
+        ancestors = place.get('ancestor_place_ids') or []
+        return [int(a) for a in reversed(ancestors) if a is not None]
+    except Exception as e:
+        logger.debug('Failed to get ancestor places for place_id=%s: %s', place_id, e)
+        return []
 
 
 def _taxa_for_kind(kind: str) -> dict:
@@ -315,19 +346,28 @@ def _lookup_nativity_via_species_counts(
     session: requests.Session,
     taxon_id: int,
     nativity_place_id: Optional[int] = None,
-) -> str:
-    """Classify nativity with small iNaturalist count queries for one taxon.
+) -> tuple[str, Optional[int]]:
+    """Classify nativity for one taxon, crawling parent regions if needed.
+
+    Queries ``/v1/observations/species_counts`` with endemic/introduced/native
+    flags against the given place, then walks up ``ancestor_place_ids`` until a
+    status is found or the hierarchy is exhausted.
+
+    Returns
+    -------
+    (label, resolved_place_id)
+        ``label`` is one of ``'Endemic'``, ``'Introduced'``, ``'Native'``, or
+        ``'Unknown'``.  ``resolved_place_id`` is the place where the status was
+        confirmed (may differ from *nativity_place_id* when a parent region was
+        needed), or ``None`` when no status was found.
     """
     base = {
         'taxon_id': taxon_id,
         'verifiable': 'true',
         'per_page': 0,
     }
-    if nativity_place_id is not None:
-        base['place_id'] = int(nativity_place_id)
 
     endpoint = 'https://api.inaturalist.org/v1/observations/species_counts'
-
     status_order = [('endemic', 'Endemic'), ('introduced', 'Introduced'), ('native', 'Native')]
 
     def _search_statuses(query_base: dict) -> Optional[str]:
@@ -336,19 +376,28 @@ def _lookup_nativity_via_species_counts(
             try:
                 response = session.get(endpoint, params=params, timeout=20)
                 response.raise_for_status()
-                payload = response.json()
-                if payload.get('total_results', 0) > 0:
+                if response.json().get('total_results', 0) > 0:
                     return label
             except Exception as e:
                 logger.debug('Nativity lookup failed for taxon %s (%s): %s', taxon_id, key, e)
-                continue
         return None
 
-    result = _search_statuses(base)
+    # Try the requested place first.
+    query = dict(base)
+    if nativity_place_id is not None:
+        query['place_id'] = int(nativity_place_id)
+    result = _search_statuses(query)
     if result:
-        return result
+        return (result, nativity_place_id)
 
-    return 'Unknown'
+    # Walk up the place hierarchy when a specific place was given.
+    if nativity_place_id is not None:
+        for ancestor_id in _get_ancestor_place_ids(session, nativity_place_id):
+            result = _search_statuses({**base, 'place_id': ancestor_id})
+            if result:
+                return (result, ancestor_id)
+
+    return ('Unknown', None)
 
 
 def _batch_lookup_nativity(
@@ -1270,12 +1319,13 @@ def coming_soon(kind: str = 'any',
                 fallback_url=fallback_url,
             )
 
-    nativity_cache = {}
-    if lineage_filter != 'any' and not results.empty:
+    nativity_cache: dict[int, tuple[str, Optional[int]]] = {}
+    if not results.empty:
         for idx in results.index:
             taxon_id = results.at[idx, 'taxon.id']
             if pd.isna(taxon_id):
                 results.at[idx, 'nativity'] = 'Unknown'
+                results.at[idx, 'nativity_place_id'] = None
                 continue
             cache_key = int(taxon_id)
             if cache_key not in nativity_cache:
@@ -1284,11 +1334,13 @@ def coming_soon(kind: str = 'any',
                     taxon_id=cache_key,
                     nativity_place_id=resolved_nativity_place_id,
                 )
-            results.at[idx, 'nativity'] = nativity_cache[cache_key]
+            label, resolved_pid = nativity_cache[cache_key]
+            results.at[idx, 'nativity'] = label
+            results.at[idx, 'nativity_place_id'] = resolved_pid
 
         if lineage_filter == 'introduced':
             results = results[results['nativity'] == 'Introduced']
-        else:
+        elif lineage_filter == 'native_endemic':
             # Keep native, endemic, AND unknown (taxa without establishment
             # records shouldn't be silently dropped — only confirmed
             # introduced taxa are excluded).
@@ -1313,14 +1365,15 @@ def coming_soon(kind: str = 'any',
             elif 'nativity' in results.columns and pd.notna(row.get('nativity')):
                 nativity = row.get('nativity')
             elif cache_key in nativity_cache:
-                nativity = nativity_cache[cache_key]
+                nativity, _ = nativity_cache[cache_key]
             else:
-                nativity = _lookup_nativity_via_species_counts(
+                _nat_label, _nat_pid = _lookup_nativity_via_species_counts(
                     session=session,
                     taxon_id=cache_key,
                     nativity_place_id=resolved_nativity_place_id,
                 )
-                nativity_cache[cache_key] = nativity
+                nativity_cache[cache_key] = (_nat_label, _nat_pid)
+                nativity = _nat_label
 
         logger.info("%s (%s) - %s", taxon_name, common_name, row.get('taxon.wikipedia_url'))
 
