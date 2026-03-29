@@ -193,12 +193,24 @@ def _resolve_nativity_place_id(
 def _get_ancestor_place_ids(
     session: requests.Session,
     place_id: int,
+    max_admin_level: int = 10,
 ) -> list[int]:
     """Return ancestor place IDs for a place, ordered from most-specific to broadest.
 
     Uses the ``ancestor_place_ids`` field from ``/v1/places/{id}``.  The API
     returns ancestors broadest-first; this function reverses that so callers can
-    crawl outward naturally (county → state → country → …).
+    crawl outward naturally (county → state → …).
+
+    Parameters
+    ----------
+    max_admin_level:
+        Stop before including any ancestor whose ``admin_level`` is less than
+        this value (i.e. broader than this level).  iNaturalist admin levels:
+        0 = country, 10 = state/province, 20 = county.  The default of 10
+        caps the crawl at state/province and avoids false-positive matches
+        from country-wide nativity records (e.g. a SE-US native falsely
+        appearing "native to the US" when queried in California).
+
     Returns an empty list on any error.
     """
     endpoint = f'https://api.inaturalist.org/v1/places/{int(place_id)}'
@@ -211,7 +223,26 @@ def _get_ancestor_place_ids(
             return []
         place = results[0] if isinstance(results[0], dict) else {}
         ancestors = place.get('ancestor_place_ids') or []
-        return [int(a) for a in reversed(ancestors) if a is not None]
+        ancestor_ids = [int(a) for a in reversed(ancestors) if a is not None]
+        if not ancestor_ids or max_admin_level is None:
+            return ancestor_ids
+
+        # Fetch the ancestor records to filter by admin_level.
+        ids_param = ','.join(str(a) for a in ancestor_ids)
+        bulk_resp = session_to_use.get(
+            'https://api.inaturalist.org/v1/places/' + ids_param,
+            timeout=12,
+        )
+        bulk_resp.raise_for_status()
+        level_map: dict[int, Optional[int]] = {}
+        for rec in bulk_resp.json().get('results', []):
+            if isinstance(rec, dict) and rec.get('id') is not None:
+                level_map[int(rec['id'])] = rec.get('admin_level')
+
+        return [
+            a for a in ancestor_ids
+            if level_map.get(a) is not None and int(level_map[a]) >= max_admin_level
+        ]
     except Exception as e:
         logger.debug('Failed to get ancestor places for place_id=%s: %s', place_id, e)
         return []

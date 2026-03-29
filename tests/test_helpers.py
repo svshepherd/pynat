@@ -919,11 +919,13 @@ def test_search_places_api_error_returns_empty():
 
 
 def test_lookup_nativity_crawls_to_parent_when_unknown_at_primary():
-    """When primary place returns no status, should resolve via ancestor."""
+    """When primary place returns no status, should resolve via state ancestor."""
     import helpers as h
 
     PARK_ID = 9999
+    COUNTY_ID = 100
     STATE_ID = 1297
+    COUNTRY_ID = 1
 
     class FakeResp:
         def __init__(self, payload):
@@ -937,9 +939,19 @@ def test_lookup_nativity_crawls_to_parent_when_unknown_at_primary():
 
     class FakeSession:
         def get(self, url, params=None, timeout=20):
-            # Places lookup for ancestor IDs
+            # Single-place lookup → returns ancestor list (broadest first)
             if f'/places/{PARK_ID}' in url:
-                return FakeResp({'results': [{'ancestor_place_ids': [1, STATE_ID]}]})
+                return FakeResp({'results': [{
+                    'id': PARK_ID,
+                    'ancestor_place_ids': [COUNTRY_ID, STATE_ID, COUNTY_ID],
+                }]})
+            # Bulk place lookup for admin_level filtering
+            if '/places/' in url and params is None:
+                return FakeResp({'results': [
+                    {'id': COUNTY_ID, 'admin_level': 20},
+                    {'id': STATE_ID, 'admin_level': 10},
+                    {'id': COUNTRY_ID, 'admin_level': 0},
+                ]})
             # species_counts: only return native at state level
             if params and params.get('place_id') == STATE_ID and params.get('native') == 'true':
                 return FakeResp({'total_results': 1, 'results': []})
@@ -952,24 +964,75 @@ def test_lookup_nativity_crawls_to_parent_when_unknown_at_primary():
     assert resolved_pid == STATE_ID
 
 
-def test_lookup_nativity_ancestor_crawl_exhausted_returns_unknown():
-    """Should return Unknown when no ancestor resolves the status."""
+def test_lookup_nativity_does_not_crawl_past_state_to_country():
+    """A species native somewhere in the US should not resolve as native in California."""
     import helpers as h
 
+    COUNTY_ID = 200   # e.g. Santa Clara County
+    STATE_ID = 14     # California
+    COUNTRY_ID = 1    # United States
+
     class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
         def raise_for_status(self):
             return None
 
         def json(self):
-            return {'total_results': 0, 'results': []}
+            return self._payload
 
     class FakeSession:
         def get(self, url, params=None, timeout=20):
-            if '/places/' in url:
-                return type('R', (), {
-                    'raise_for_status': lambda self: None,
-                    'json': lambda self: {'results': [{'ancestor_place_ids': [10, 20]}]},
-                })()
+            if f'/places/{COUNTY_ID}' in url:
+                return FakeResp({'results': [{
+                    'id': COUNTY_ID,
+                    'ancestor_place_ids': [COUNTRY_ID, STATE_ID],
+                }]})
+            if '/places/' in url and params is None:
+                return FakeResp({'results': [
+                    {'id': STATE_ID, 'admin_level': 10},
+                    {'id': COUNTRY_ID, 'admin_level': 0},
+                ]})
+            # native=true only hits at country level (SE-US native, not CA native)
+            if params and params.get('place_id') == COUNTRY_ID and params.get('native') == 'true':
+                return FakeResp({'total_results': 5, 'results': []})
+            return FakeResp({'total_results': 0, 'results': []})
+
+    label, resolved_pid = h._lookup_nativity_via_species_counts(
+        session=FakeSession(), taxon_id=42, nativity_place_id=COUNTY_ID
+    )
+    # Country-level match should be excluded; result must be Unknown
+    assert label == 'Unknown'
+    assert resolved_pid is None
+
+
+def test_lookup_nativity_ancestor_crawl_exhausted_returns_unknown():
+    """Should return Unknown when no ancestor within max_admin_level resolves the status."""
+    import helpers as h
+
+    class FakeResp:
+        def __init__(self, payload=None):
+            self._payload = payload or {'total_results': 0, 'results': []}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    STATE_ID = 10
+    COUNTRY_ID = 20
+
+    class FakeSession:
+        def get(self, url, params=None, timeout=20):
+            if '/places/999' in url:
+                return FakeResp({'results': [{'id': 999, 'ancestor_place_ids': [COUNTRY_ID, STATE_ID]}]})
+            if '/places/' in url and params is None:
+                return FakeResp({'results': [
+                    {'id': STATE_ID, 'admin_level': 10},
+                    {'id': COUNTRY_ID, 'admin_level': 0},
+                ]})
             return FakeResp()
 
     label, resolved_pid = h._lookup_nativity_via_species_counts(
