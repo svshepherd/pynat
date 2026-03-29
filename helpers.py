@@ -27,10 +27,20 @@ try:
 except Exception:
     inat = None
     HAS_PYINAT = False
-import dill
+try:
+    import dill
+    HAS_DILL = True
+except Exception:
+    dill = None
+    HAS_DILL = False
 import pickle
 import os
-import ipyplot
+try:
+    import ipyplot
+    HAS_IPYPLOT = True
+except Exception:
+    ipyplot = None
+    HAS_IPYPLOT = False
 import logging
 try:
     from IPython.display import HTML, display, Markdown
@@ -470,6 +480,8 @@ def load_api_key(fallback_path: str = 'pyinaturalistkey.pkd') -> Union[str, None
         if abs_path in seen_paths:
             continue
         seen_paths.add(abs_path)
+        if not HAS_DILL:
+            continue
         try:
             with open(abs_path, 'rb') as f:
                 return dill.load(f)
@@ -578,10 +590,13 @@ def get_mine(uname: str,
             logger.debug('No valid photo URLs for observation %s', obs_id)
             continue
 
-        try:
-            ipyplot.plot_images(images)
-        except Exception as e:
-            logger.warning('Failed to display images for %s: %s', obs_id, e)
+        if HAS_IPYPLOT:
+            try:
+                ipyplot.plot_images(images)
+            except Exception as e:
+                logger.warning('Failed to display images for %s: %s', obs_id, e)
+        else:
+            logger.warning('ipyplot not available; skipping image display for %s', obs_id)
 
 
 def get_inat_session(token: Optional[str] = None,
