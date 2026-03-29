@@ -134,9 +134,16 @@ def _derive_place_id_from_location(
     lat: float,
     lng: float,
 ) -> Optional[int]:
-    """Derive a regional place id from coordinates (prefer state/province).
+    """Derive a regional iNaturalist place ID from geographic coordinates.
 
-    Returns ``None`` when geocoding fails so callers can fall back gracefully.
+    Queries the ``/v1/places/nearby`` endpoint and prefers a state/province
+    level place (``admin_level == 10``) for nativity lookups.  State-level
+    scope avoids false positives that arise from country-level queries (e.g.
+    a SE-US native registering as "native to the US" when searched in CA).
+
+    Returns the first state-level place ID found, or the first result at any
+    level if no state-level place exists.  Returns ``None`` on any network or
+    parsing failure so callers can degrade gracefully.
     """
     endpoint = 'https://api.inaturalist.org/v1/places/nearby'
     try:
@@ -170,7 +177,17 @@ def _resolve_nativity_place_id(
     places: Optional[list[int]],
     loc: Optional[tuple[float, float, float]],
 ) -> Optional[int]:
-    """Resolve nativity place id from explicit value, auto mode, or global mode."""
+    """Resolve the place ID to use when classifying a taxon's nativity status.
+
+    Three modes are supported:
+    - ``None``    — skip nativity classification entirely (global scope).
+    - ``'auto'``  — infer from query context: use the first place ID in
+                    ``places``, or geocode from ``loc`` coordinates.
+    - ``int``     — use the caller-supplied place ID directly.
+
+    Returns an integer place ID, or ``None`` when nativity should be
+    evaluated globally (no place filter).
+    """
     if nativity_place_id is None:
         return None
 
@@ -249,7 +266,21 @@ def _get_ancestor_place_ids(
 
 
 def _taxa_for_kind(kind: str) -> dict:
-    """Return iNaturalist API taxa filters for a supported kind."""
+    """Return iNaturalist API query parameters that scope results to a taxon group.
+
+    The returned dict is merged directly into API call kwargs.  Most kinds are
+    represented by a ``taxon_id`` alone; phenotype-specific kinds (flowers,
+    fruits, butterflies, caterpillars) additionally filter by annotation
+    ``term_id``/``term_value_id`` fields from the iNaturalist controlled
+    vocabulary (term 12 = Plant Phenology, term 1 = Life Stage).
+
+    Supported kind strings:
+        any, plants, flowers, fruits, mushrooms, animals, wugs, fish,
+        herps, birds, mammals, butterflies, caterpillars
+
+    ``wugs`` is invertebrates (animals minus vertebrates).
+    ``herps`` covers reptiles (26036) and amphibians (20978).
+    """
     normalized_kind = (kind or '').lower().strip()
     if normalized_kind == 'fruit':
         normalized_kind = 'fruits'
@@ -285,6 +316,11 @@ def _taxa_for_kind(kind: str) -> dict:
 
 
 def _extract_photo_url(observation: dict) -> Optional[str]:
+    """Return the first usable photo URL from an observation dict.
+
+    Converts ``square``-size URLs to ``medium`` for better display quality.
+    Returns ``None`` if no photos are present or all URLs are empty.
+    """
     photos = observation.get('photos') if isinstance(observation, dict) else None
     if not isinstance(photos, list):
         return None
@@ -304,7 +340,18 @@ def _get_filtered_photo_url(
     time_filters: list[dict],
     fallback_url: Optional[str],
 ) -> Optional[str]:
-    """Pick a representative photo from observations matching current filters."""
+    """Return a photo URL that shows the taxon in the appropriate phenological state.
+
+    For phenotype-specific kinds (flowers, fruits, butterflies, caterpillars),
+    the default taxon photo may show the wrong life stage.  This function
+    queries recent, highly-voted observations filtered by the same annotation
+    terms (e.g. Plant Phenology = Flowering) and place/time window used for
+    the main query, so the displayed photo actually matches the kind.
+
+    Tries each time-window slice first (most seasonally relevant), then falls
+    back to the full place query without a date filter, and finally returns
+    ``fallback_url`` (the taxon default photo) if nothing better is found.
+    """
     query_params = {
         'taxon_id': taxon_id,
         'verifiable': 'true',
@@ -349,7 +396,17 @@ def _get_filtered_photo_url(
 
 
 def _infer_nativity_from_row(row: pd.Series) -> Optional[str]:
-    """Infer nativity label from flattened taxon columns when present."""
+    """Infer a nativity label from flattened taxon columns already in a DataFrame row.
+
+    This is a fast, no-network path used when the species_counts response
+    already includes establishment_means or native/endemic/introduced flags
+    (which happens in some API response shapes).  Returns ``None`` when no
+    usable nativity signal is present, signalling that the caller should fall
+    back to ``_lookup_nativity_via_species_counts``.
+
+    Priority: explicit establishment_means string > endemic flag > native flag
+    > introduced flag.
+    """
     candidates = [
         row.get('taxon.establishment_means.establishment_means'),
         row.get('taxon.establishment_means.place.id'),
@@ -501,6 +558,7 @@ def _batch_lookup_nativity(
 
 
 def _format_photo_title(common_name: str, scientific_name: str, nativity: str) -> str:
+    """Format a multi-line matplotlib axes title for a species photo."""
     return f"{common_name}\n{scientific_name}\nNativity: {nativity}"
 
 def load_api_key(fallback_path: str = 'pyinaturalistkey.pkd') -> Union[str, None]:
@@ -683,12 +741,20 @@ def get_inat_session(token: Optional[str] = None,
                      use_cache: bool = True,
                      cache_name: str = 'inat_cache',
                      expire_seconds: int = 24 * 3600) -> requests.Session:
-    """Create a requests session configured for iNaturalist.
+    """Create a ``requests.Session`` pre-configured for the iNaturalist API.
 
-    Uses explicit ``token`` first, then environment variables, then
-    :func:`load_api_key` as a final fallback.
-    Installs `requests_cache` if available and `use_cache` is True.
-    Sets the appropriate Authorization header when a token is present.
+    Token resolution order:
+    1. Explicit ``token`` argument.
+    2. Environment variables: INAT_TOKEN, INAT_API_KEY, PYINAT_API_KEY, INAT_KEY.
+    3. :func:`load_api_key` (keyring / dill file fallback).
+
+    When ``use_cache`` is True and ``requests_cache`` is installed, patches the
+    session with a SQLite-backed HTTP cache (default: 24-hour TTL).  This
+    substantially reduces API calls during iterative notebook work.
+
+    The Authorization header uses iNaturalist's ``Token token="..."`` format,
+    which is required for endpoints that respect per-user rate limits and
+    authenticated features (e.g. private coordinates).
     """
     token = token or os.environ.get('INAT_TOKEN') or os.environ.get('INAT_API_KEY') or os.environ.get('PYINAT_API_KEY') or os.environ.get('INAT_KEY')
     if not token:
@@ -710,6 +776,13 @@ def get_inat_session(token: Optional[str] = None,
 
 
 def _normalize_project_id_value(project_id: Union[int, str, Iterable[Union[int, str]], None]) -> Union[int, str, list[Union[int, str]], None]:
+    """Coerce project IDs to consistent types for API query construction.
+
+    iNaturalist accepts project IDs as integers or slug strings.  This function
+    converts digit-only strings to ints so the query dict stays canonical and
+    comparable.  Lists/tuples/sets are preserved as lists; single values are
+    returned as-is (int or string slug).
+    """
     if project_id is None:
         return None
     if isinstance(project_id, (list, tuple, set)):
@@ -726,12 +799,22 @@ def _normalize_project_id_value(project_id: Union[int, str, Iterable[Union[int, 
 
 
 def _serialize_query_value(value: Any) -> Any:
+    """Convert Python booleans to lowercase strings for REST query parameters.
+
+    The iNaturalist REST API expects ``'true'``/``'false'`` strings, not Python
+    bool objects.  Other types are returned unchanged.
+    """
     if isinstance(value, bool):
         return 'true' if value else 'false'
     return value
 
 
 def _rest_params_from_query(query: dict[str, Any]) -> dict[str, Any]:
+    """Convert a query dict to REST-safe params, dropping ``None`` values.
+
+    Applies :func:`_serialize_query_value` to each entry so the result can be
+    passed directly to ``requests.get(params=...)``.
+    """
     return {key: _serialize_query_value(value) for key, value in query.items() if value is not None}
 
 
@@ -746,6 +829,14 @@ def _build_observation_query(kind: str,
                              verifiable: bool,
                              order_by: str,
                              order: str) -> dict[str, Any]:
+    """Assemble a canonical iNaturalist observations query dictionary.
+
+    Merges taxon, location, date, project, and sort parameters into a single
+    dict suitable for :func:`_rest_params_from_query`.  Exactly one of
+    ``places`` or ``loc`` must be provided (or neither, though that is rarely
+    useful).  ``taxa_filters`` from :func:`_taxa_for_kind` are merged in and
+    override any conflicting keys.
+    """
     assert not (places and loc), "only one of places and loc should be provided"
 
     query = {
@@ -774,6 +865,16 @@ def _build_observation_query(kind: str,
 
 
 def _parse_observation_location(observation: dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
+    """Extract (latitude, longitude) from an observation dict.
+
+    Tries two sources in order:
+    1. ``geojson.coordinates`` — preferred; GeoJSON uses (lng, lat) order so
+       indices are deliberately swapped when reading.
+    2. ``location`` string — a comma-separated "lat,lng" fallback present on
+       some older API responses.
+
+    Returns ``(None, None)`` when neither source yields parseable coordinates.
+    """
     geojson = observation.get('geojson') if isinstance(observation.get('geojson'), dict) else None
     if geojson:
         coordinates = geojson.get('coordinates')
@@ -794,6 +895,14 @@ def _parse_observation_location(observation: dict[str, Any]) -> tuple[Optional[f
 
 
 def _extract_observation_photo_url(observation: dict[str, Any], taxon: dict[str, Any]) -> Optional[str]:
+    """Return the best available photo URL for a single observation.
+
+    Prefers the first ``observation_photos`` entry (the observer's own upload,
+    shown at medium size) over the taxon default photo.  The taxon default is
+    used as a fallback when no observation-level photo is present.
+
+    URLs are normalized from ``square`` to ``medium`` size for display.
+    """
     observation_photos = observation.get('observation_photos') if isinstance(observation.get('observation_photos'), list) else []
     for item in observation_photos:
         if not isinstance(item, dict):
@@ -811,6 +920,7 @@ def _extract_observation_photo_url(observation: dict[str, Any], taxon: dict[str,
 
 
 def _to_iso_timestamp(value: Any) -> Optional[str]:
+    """Parse any date-like value and return an ISO-8601 string in UTC, or ``None``."""
     timestamp = pd.to_datetime(value, utc=True, errors='coerce')
     if pd.isna(timestamp):
         return None
@@ -818,6 +928,12 @@ def _to_iso_timestamp(value: Any) -> Optional[str]:
 
 
 def _delay_in_days(observed_value: Any, identified_value: Any) -> Optional[float]:
+    """Return the elapsed time in fractional days between two timestamps.
+
+    Used to compute identification delay metrics (how long after an observation
+    was posted before it received a community identification).  Returns ``None``
+    when either timestamp is missing or unparseable.
+    """
     observed = pd.to_datetime(observed_value, utc=True, errors='coerce')
     identified = pd.to_datetime(identified_value, utc=True, errors='coerce')
     if pd.isna(observed) or pd.isna(identified):
@@ -826,6 +942,16 @@ def _delay_in_days(observed_value: Any, identified_value: Any) -> Optional[float
 
 
 def _identification_time_fields(observation: dict[str, Any]) -> dict[str, Any]:
+    """Extract identification timing and count fields from a raw observation dict.
+
+    Iterates the ``identifications`` list and partitions entries into two groups:
+    - *all* identifications (including the observer's own).
+    - *non-owner* identifications (community IDs from other users).
+
+    Returns a dict of derived fields including per-group timestamps, counts,
+    and delay-in-days from observation date to first identification.  These
+    fields are used to study community identification speed and engagement.
+    """
     identifications = observation.get('identifications') if isinstance(observation.get('identifications'), list) else []
     observer = observation.get('user') if isinstance(observation.get('user'), dict) else {}
     observer_id = observer.get('id')
@@ -872,6 +998,14 @@ def _identification_time_fields(observation: dict[str, Any]) -> dict[str, Any]:
 def _normalize_observation_record(observation: dict[str, Any],
                                   query_kind: str,
                                   query_project_id: Union[int, str, Iterable[Union[int, str]], None]) -> dict[str, Any]:
+    """Flatten a raw iNaturalist observation dict into a stable row dict.
+
+    Extracts, renames, and coerces fields from the nested API response into the
+    flat schema defined by ``OBSERVATION_ROW_COLUMNS``.  Adds derived fields
+    (identification timing, photo URL, query metadata) that are not present
+    directly in the API response.  The output is safe to pass directly to
+    ``pd.DataFrame(..., columns=OBSERVATION_ROW_COLUMNS)``.
+    """
     taxon = observation.get('taxon') if isinstance(observation.get('taxon'), dict) else {}
     observer = observation.get('user') if isinstance(observation.get('user'), dict) else {}
     latitude, longitude = _parse_observation_location(observation)
@@ -1042,7 +1176,17 @@ def annotate_taxon_nativity(observations: pd.DataFrame,
                             token: Optional[str] = None,
                             session: Optional[requests.Session] = None,
                             use_cache: bool = True) -> pd.DataFrame:
-    """Add a nativity label for each taxon represented in ``observations``."""
+    """Add a ``nativity`` column to an observations DataFrame.
+
+    Looks up each unique taxon ID via :func:`_batch_lookup_nativity` (which
+    batches API calls to avoid per-row network requests) and maps the result
+    back onto every row.  The nativity label is one of: ``'Native'``,
+    ``'Endemic'``, ``'Introduced'``, or ``'Unknown'``.
+
+    ``nativity_place_id`` scopes the status query to a specific region.  The
+    module default (``DEFAULT_NATIVITY_PLACE_ID``) is Virginia; override it
+    when working with observations from another region.
+    """
     if taxon_id_col not in observations.columns:
         raise KeyError(f"Missing taxon id column: {taxon_id_col}")
 
@@ -1079,7 +1223,32 @@ def summarize_time_series(frame: pd.DataFrame,
                           count_col: Optional[str] = 'obs_id',
                           count_name: str = 'count',
                           value_aggs: Optional[dict[str, tuple[str, str]]] = None) -> pd.DataFrame:
-    """Aggregate observation-like rows into a period-based summary table."""
+    """Aggregate observation rows into a period-based summary table.
+
+    Groups rows by calendar period (default: month start, ``freq='MS'``) and
+    any additional ``group_cols`` (e.g. taxon name, species), then counts
+    distinct values in ``count_col`` and applies optional aggregations.
+
+    Parameters
+    ----------
+    frame:
+        Input DataFrame produced by :func:`get_observation_rows` or similar.
+    date_col:
+        Column to use as the time axis.  Must be parseable by ``pd.to_datetime``.
+    freq:
+        Pandas period frequency string (e.g. ``'MS'`` = month start,
+        ``'W'`` = weekly).
+    group_cols:
+        Additional columns to group by within each period (e.g. taxon).
+    count_col:
+        Column to count distinct values of (e.g. ``'obs_id'`` for unique
+        observations).  Falls back to row count if the column is absent.
+    count_name:
+        Output column name for the count.
+    value_aggs:
+        Extra aggregations as ``{output_name: (source_col, agg_func)}``
+        (e.g. ``{'median_delay': ('first_identification_delay_days', 'median')}``).
+    """
     if date_col not in frame.columns:
         raise KeyError(f"Missing date column: {date_col}")
 
@@ -1190,6 +1359,10 @@ def coming_soon(kind: str = 'any',
     per_page_value = max(1, int(per_page)) if per_page is not None else None
     max_pages_value = max(1, int(max_pages)) if max_pages is not None else None
 
+    # Build a ±1-week window around today, grouped by month.
+    # The API is queried once per month that falls in the window (usually 1,
+    # occasionally 2 near month boundaries).  Each entry is a dict of
+    # {month, day: [...]} that gets splatted into the species_counts call.
     time = []
     strt = dt.date.today()+dt.timedelta(days=-6)
     fnsh = dt.date.today()+dt.timedelta(days=7)
@@ -1197,6 +1370,9 @@ def coming_soon(kind: str = 'any',
     for month in dates.month.unique():
         time.append({'month':month, 'day':list(dates[dates.month==month].day)})
 
+    # Minimal column set expected from the species_counts response after
+    # json_normalize.  Selecting these up-front ensures a consistent schema
+    # across all time-window slices before concatenation.
     COLS = ['taxon.id', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url', 'taxon.default_photo.medium_url', 'count']
 
     # Prepare session if needed (fallback path)
@@ -1252,6 +1428,9 @@ def coming_soon(kind: str = 'any',
                         break
                 frames = pd.concat(chunk_frames, ignore_index=True) if chunk_frames else pd.DataFrame()
         results.append(frames)
+    # Concatenate per-time-window slices, then sum observation counts for each
+    # unique taxon so a species that appears across multiple months gets a
+    # single aggregated count rather than duplicate rows.
     results = pd.concat(results)[COLS]
     results = results.groupby(['taxon.id', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url', 'taxon.default_photo.medium_url']).sum().reset_index()
 
@@ -1313,8 +1492,13 @@ def coming_soon(kind: str = 'any',
             results['normalizer'] = np.nan
             results['sorter'] = 0
         else:
+            # Carry annotation term filters (phenology/life-stage) into normalization
+            # queries so the denominator reflects the same phenological state as the
+            # numerator (e.g. flowering observations, not all plant observations).
             extra = {key: value for key, value in taxa.items() if key in {'term_id', 'term_value_id'}}
             if norm == 'place':
+                # Normalize by place+time: how common is each taxon in this
+                # location during this same seasonal window in any year?
                 frames = []
                 for t in time:
                     df = _chunked_get_counts(taxon_ids, extra_kwargs={**extra, **t})
@@ -1322,6 +1506,12 @@ def coming_soon(kind: str = 'any',
                         frames.append(df)
                 normer_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
             else:
+                # 'time' norm: how common is each taxon in this location
+                #   across *all* dates (removes place bias, highlights what is
+                #   unusually active right now vs. the annual baseline).
+                # 'overall' norm: how common is each taxon globally across all
+                #   dates and places (surfaces locally rare but globally common
+                #   species less prominently).
                 extra_kwargs = place if norm == 'time' else {}
                 normer_df = _chunked_get_counts(taxon_ids, extra_kwargs=extra_kwargs)
 
@@ -1547,6 +1737,12 @@ def _compute_location_from_values(mode: str,
                                   lat_value: Optional[float],
                                   lon_value: Optional[float],
                                   radius_value: Optional[float]) -> dict[str, Any]:
+    """Convert widget/form values into the location kwargs expected by :func:`coming_soon`.
+
+    Returns ``{'places': [id]}`` for place-ID mode, or
+    ``{'loc': (lat, lon, radius)}`` for coordinate mode.  Raises
+    ``ValueError`` when required fields are missing.
+    """
     if mode == 'place':
         if not place_id_value:
             raise ValueError('Please provide a valid Place ID.')
@@ -1559,6 +1755,13 @@ def _compute_location_from_values(mode: str,
 
 
 def _nativity_value(mode: str, nativity_id_value: Optional[int]) -> Union[str, int, None]:
+    """Translate a UI nativity-mode string into the value expected by :func:`coming_soon`.
+
+    ``'auto'`` → the string ``'auto'`` (auto-derive from query context).
+    ``'none'`` → ``None`` (skip nativity lookup entirely).
+    ``'id'``   → the integer place ID from ``nativity_id_value``, falling
+                 back to ``'auto'`` if no ID was supplied.
+    """
     if mode == 'auto':
         return 'auto'
     if mode == 'none':
@@ -1576,6 +1779,12 @@ def _run_coming_soon_query(kind_value: str,
                            nativity_value: Union[str, int, None],
                            token: Optional[str] = None,
                            session: Optional[requests.Session] = None) -> pd.DataFrame:
+    """Thin adapter that maps UI control values to :func:`coming_soon` arguments.
+
+    Converts the ``'none'`` sentinel string for norm to ``None`` (the API
+    expects ``None`` to mean "no normalization", while the UI represents the
+    same choice as the string ``'none'`` to make it selectable in dropdowns).
+    """
     norm_arg = None if norm_value in [None, 'none'] else norm_value
     return coming_soon(
         kind=kind_value,
@@ -1592,6 +1801,13 @@ def _run_coming_soon_query(kind_value: str,
 
 
 def _lookup_place_name(session: Optional[requests.Session], place_id: Optional[int]) -> Optional[str]:
+    """Resolve a human-readable display name for an iNaturalist place ID.
+
+    Used to show a friendly label alongside numeric place IDs in the UI.
+    Prefers ``display_name`` over ``name`` from the API response.
+    Returns ``None`` on any error or if the place is not found, so callers
+    can safely omit the label rather than crashing.
+    """
     if place_id is None:
         return None
     try:

@@ -123,8 +123,20 @@ if st.session_state.get("run"):
             lineage_filter,
         )
     except Exception as exc:
-        st.error(f"Query failed: {exc}")
-        st.info("Verify your Place ID or coordinates and try a different group.")
+        exc_str = str(exc)
+        if "are in the [columns]" in exc_str:
+            st.warning(
+                "No observations were found for this location and group combination. "
+                "This usually means the place is too small or too specific to have enough iNaturalist data."
+            )
+            st.info(
+                "**Try a larger place** — a county, state/national park, or state tends to work well. "
+                "Places larger than a state (e.g. a country or continent) are usually too broad "
+                "to give meaningful 'coming soon' results."
+            )
+        else:
+            st.error(f"Query failed: {exc}")
+            st.info("Verify your Place ID or coordinates and try a different group.")
         st.stop()
 
     if res is None or res.empty:
