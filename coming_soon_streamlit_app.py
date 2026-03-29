@@ -2,8 +2,6 @@
 
 Run with:  streamlit run coming_soon_streamlit_app.py
 """
-# -*- coding: utf-8 -*-
-
 import streamlit as st
 import pandas as pd
 
@@ -11,7 +9,6 @@ from helpers import (
     coming_soon,
     get_inat_session,
     load_api_key,
-    _compute_location_from_values,
     _lookup_place_name,
     _search_places,
 )
@@ -52,9 +49,10 @@ if place_mode == "Place ID":
         search_results = _search_places(session, search_query)
         if search_results:
             result_labels = [r["display_name"] for r in search_results]
-            chosen_label = st.sidebar.selectbox("Select place", result_labels, key="place_select")
-            chosen = next(r for r in search_results if r["display_name"] == chosen_label)
-            st.session_state["place_id_input"] = chosen["id"]
+            chosen_idx = result_labels.index(
+                st.sidebar.selectbox("Select place", result_labels, key="place_select")
+            )
+            st.session_state["place_id_input"] = search_results[chosen_idx]["id"]
         else:
             st.sidebar.caption("No places found.")
 
@@ -64,12 +62,12 @@ if place_mode == "Place ID":
     place_name = _lookup_place_name(session, int(place_id))
     if place_name:
         st.sidebar.caption(f"📍 {place_name}")
-    location_kwargs = _compute_location_from_values("place", int(place_id), None, None, None)
+    location_key = ("place", int(place_id))
 else:
     lat = st.sidebar.number_input("Latitude", value=37.66933, format="%.5f")
     lon = st.sidebar.number_input("Longitude", value=-77.81001, format="%.5f")
     radius_km = st.sidebar.number_input("Radius (km)", min_value=1.0, value=42.0, step=1.0)
-    location_kwargs = _compute_location_from_values("coords", None, lat, lon, radius_km)
+    location_key = ("coords", lat, lon, radius_km)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Normalization & filtering")
@@ -94,20 +92,14 @@ show_images = st.sidebar.checkbox("Show images", value=True)
 def _run_query(_session, kind, location_key, norm, limit, lineage_filter):
     """Cached wrapper around coming_soon().
 
-    ``location_key`` is a hashable tuple for cache keying; real kwargs are
-    rebuilt inside the function.
+    ``location_key`` is a hashable tuple: ("place", id) or ("coords", lat, lon, km).
     """
     mode, *vals = location_key
-    if mode == "place":
-        loc_kwargs = {"places": [vals[0]]}
-    else:
-        loc_kwargs = {"loc": tuple(vals)}
-
-    norm_arg = None if norm == "none" else norm
+    loc_kwargs = {"places": [vals[0]]} if mode == "place" else {"loc": tuple(vals)}
     return coming_soon(
         kind=kind,
         **loc_kwargs,
-        norm=norm_arg,
+        norm=None if norm == "none" else norm,
         limit=limit,
         fetch_images=False,
         use_cache=True,
@@ -115,14 +107,6 @@ def _run_query(_session, kind, location_key, norm, limit, lineage_filter):
         nativity_place_id='auto',
         session=_session,
     )
-
-
-def _location_key(kwargs):
-    """Convert location_kwargs to a hashable tuple for cache keying."""
-    if "places" in kwargs:
-        return ("place", kwargs["places"][0])
-    loc = kwargs["loc"]
-    return ("coords", loc[0], loc[1], loc[2])
 
 
 if st.sidebar.button("Run Query", type="primary", use_container_width=True):
@@ -133,7 +117,7 @@ if st.session_state.get("run"):
         res = _run_query(
             session,
             kind,
-            _location_key(location_kwargs),
+            location_key,
             norm,
             limit,
             lineage_filter,
