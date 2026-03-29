@@ -14,6 +14,7 @@ from helpers import (
     _compute_location_from_values,
     _lookup_place_name,
     _nativity_value,
+    _search_places,
 )
 
 st.set_page_config(page_title="Coming Soon Near You", page_icon="🌿", layout="wide")
@@ -45,7 +46,22 @@ kind = st.sidebar.selectbox("Kind", KIND_OPTIONS, index=KIND_OPTIONS.index("flow
 place_mode = st.sidebar.radio("Location mode", ["Place ID", "Coordinates"])
 
 if place_mode == "Place ID":
-    place_id = st.sidebar.number_input("Place ID", min_value=1, value=160915, step=1)
+    search_query = st.sidebar.text_input(
+        "Search place name", placeholder="e.g. Shenandoah", key="place_search"
+    )
+    if search_query and len(search_query.strip()) >= 3:
+        search_results = _search_places(session, search_query)
+        if search_results:
+            result_labels = [r["display_name"] for r in search_results]
+            chosen_label = st.sidebar.selectbox("Select place", result_labels, key="place_select")
+            chosen = next(r for r in search_results if r["display_name"] == chosen_label)
+            st.session_state["place_id_input"] = chosen["id"]
+        else:
+            st.sidebar.caption("No places found.")
+
+    place_id = st.sidebar.number_input(
+        "Place ID", min_value=1, value=160915, step=1, key="place_id_input"
+    )
     place_name = _lookup_place_name(session, int(place_id))
     if place_name:
         st.sidebar.caption(f"📍 {place_name}")

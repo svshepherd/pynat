@@ -860,3 +860,55 @@ def test_get_observation_rows_preflight_zero_results(monkeypatch):
     assert len(session.calls) == 1
     assert session.calls[0].get('per_page') == 0
 
+
+def test_search_places_returns_results():
+    import helpers as h
+
+    class FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                'results': [
+                    {'id': 42, 'display_name': 'Shenandoah National Park'},
+                    {'id': 99, 'display_name': 'Shenandoah Valley'},
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self):
+            self.last_params = None
+
+        def get(self, url, params=None, timeout=12):
+            assert 'autocomplete' in url
+            self.last_params = params
+            return FakeResp()
+
+    session = FakeSession()
+    results = h._search_places(session, 'Shenandoah')
+    assert len(results) == 2
+    assert results[0] == {'id': 42, 'display_name': 'Shenandoah National Park'}
+    assert session.last_params['q'] == 'Shenandoah'
+
+
+def test_search_places_empty_query_returns_empty():
+    import helpers as h
+
+    results = h._search_places(None, '')
+    assert results == []
+
+    results = h._search_places(None, '   ')
+    assert results == []
+
+
+def test_search_places_api_error_returns_empty():
+    import helpers as h
+
+    class BrokenSession:
+        def get(self, url, params=None, timeout=12):
+            raise ConnectionError('network down')
+
+    results = h._search_places(BrokenSession(), 'Virginia')
+    assert results == []
+

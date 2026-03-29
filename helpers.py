@@ -1517,6 +1517,40 @@ def _lookup_place_name(session: Optional[requests.Session], place_id: Optional[i
     return None
 
 
+def _search_places(
+    session: Optional[requests.Session],
+    query: str,
+    per_page: int = 10,
+) -> list[dict[str, Any]]:
+    """Search iNaturalist places by name using the autocomplete endpoint.
+
+    Returns a list of dicts with ``id`` and ``display_name`` keys, or an
+    empty list if the query is blank or the request fails.
+    """
+    if not query or not query.strip():
+        return []
+    endpoint = 'https://api.inaturalist.org/v1/places/autocomplete'
+    session_to_use = session or requests.Session()
+    try:
+        response = session_to_use.get(
+            endpoint,
+            params={'q': query.strip(), 'per_page': per_page},
+            timeout=12,
+        )
+        response.raise_for_status()
+        results = response.json().get('results', [])
+        places = []
+        for place in results:
+            pid = place.get('id')
+            name = place.get('display_name') or place.get('name') or ''
+            if pid is not None and name:
+                places.append({'id': int(pid), 'display_name': name.strip()})
+        return places
+    except Exception as e:
+        logger.debug('Place autocomplete failed for query=%r: %s', query, e)
+        return []
+
+
 def coming_soon_notebook(defaults: Optional[dict[str, Any]] = None,
                          use_widgets: Optional[bool] = None,
                          token: Optional[str] = None,
