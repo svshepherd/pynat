@@ -66,7 +66,7 @@ if place_mode == "Place ID":
 else:
     lat = st.sidebar.number_input("Latitude", value=37.66933, format="%.5f")
     lon = st.sidebar.number_input("Longitude", value=-77.81001, format="%.5f")
-    radius_km = st.sidebar.number_input("Radius (km)", min_value=1.0, value=42.0, step=1.0)
+    radius_km = st.sidebar.number_input("Radius (km)", min_value=1.0, value=5.0, step=1.0)
     location_key = ("coords", lat, lon, radius_km)
 
 st.sidebar.markdown("---")
