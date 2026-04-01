@@ -68,6 +68,55 @@ def test_get_mine_monkeypatched(monkeypatch):
     assert h.get_mine("me", STRT=None, FNSH=None) is None
 
 
+def test_get_mine_rest_fallback(monkeypatch):
+    import helpers as h
+
+    class FakeResp:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, params=None, timeout=30):
+            self.calls.append((url, params))
+            if params.get('page') == 1:
+                return FakeResp(
+                    {
+                        'results': [
+                            {
+                                'id': 456,
+                                'observed_on': '2026-02-01',
+                                'species_guess': 'Fallback species',
+                                'taxon': {'name': 'Fallback taxon'},
+                                'observation_photos': [
+                                    {'photo': {'url': 'https://example.org/photos/9/square.jpg'}}
+                                ],
+                            }
+                        ]
+                    }
+                )
+            return FakeResp({'results': []})
+
+    monkeypatch.setattr(h, 'HAS_PYINAT', False)
+    if h.HAS_IPYPLOT:
+        monkeypatch.setattr(h.ipyplot, 'plot_images', lambda imgs: None)
+
+    session = FakeSession()
+    assert h.get_mine('me', STRT=dt.date(2026, 2, 1), FNSH=dt.date(2026, 2, 2), session=session) is None
+    assert any('/v1/observations' in call[0] for call in session.calls)
+
+
 def test_get_park_data_rest_fallback(monkeypatch):
     import helpers as h
 
@@ -103,6 +152,44 @@ def test_get_park_data_rest_fallback(monkeypatch):
     assert isinstance(res, pd.DataFrame)
     assert not res.empty
     assert "taxon.name" in res.columns
+
+
+def test_get_park_data_rest_fallback_uses_v2_endpoint(monkeypatch):
+    import helpers as h
+
+    class FakeResp:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url, params=None, timeout=30):
+            self.urls.append(url)
+            if params and params.get("taxon_id"):
+                return FakeResp({"results": [{"taxon.id": 1, "count": 100}]})
+            return FakeResp({"results": [{
+                "taxon.id": 1,
+                "taxon.name": "Specimen",
+                "taxon.preferred_common_name": "Spec",
+                "taxon.wikipedia_url": None,
+                "count": 10,
+            }]})
+
+    monkeypatch.setattr(h, "HAS_PYINAT", False)
+    session = FakeSession()
+    h.get_park_data((0, 0, 1), "any", limit=5, session=session, per_page=10, max_pages=1, api_version='v2')
+    assert any('/v2/observations/species_counts' in url for url in session.urls)
 
 
 def test_wugs_uses_without_taxon_id():
@@ -175,6 +262,49 @@ def test_coming_soon_defaults_to_any(monkeypatch):
     assert isinstance(res, pd.DataFrame)
     assert not res.empty
     assert "taxon.name" in res.columns
+
+
+def test_coming_soon_rest_fallback_uses_v2_endpoint(monkeypatch):
+    import helpers as h
+
+    class FakeResp:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url, params=None, timeout=30):
+            self.urls.append(url)
+            if params and params.get('taxon_id'):
+                return FakeResp({'results': [{'taxon.id': 1, 'count': 20}]})
+            return FakeResp({'results': [{
+                'taxon.id': 1,
+                'taxon.name': 'Specimen',
+                'taxon.preferred_common_name': 'Spec',
+                'taxon.wikipedia_url': 'https://example.org/wiki/specimen',
+                'taxon.default_photo.medium_url': 'https://example.org/specimen.jpg',
+                'count': 3,
+            }]})
+
+    monkeypatch.setattr(h, 'HAS_PYINAT', False)
+    # Avoid additional lookup noise in this endpoint assertion.
+    monkeypatch.setattr(h, '_lookup_nativity_via_species_counts', lambda *args, **kwargs: ('Unknown', None))
+
+    session = FakeSession()
+    res = h.coming_soon(loc=(0, 0, 1), limit=3, norm='overall', session=session, api_version='v2')
+    assert isinstance(res, pd.DataFrame)
+    assert any('/v2/observations/species_counts' in url for url in session.urls)
 
 
 def test_infer_nativity_from_row_establishment_means():
@@ -272,7 +402,7 @@ def test_coming_soon_lineage_filter_introduced(monkeypatch):
             ]}
         return {"results": []}
 
-    def fake_nativity(session, taxon_id, nativity_place_id=None):
+    def fake_nativity(session, taxon_id, nativity_place_id=None, api_version='v1'):
         label = "Introduced" if int(taxon_id) == 2 else "Native"
         return (label, nativity_place_id)
 
@@ -312,7 +442,7 @@ def test_coming_soon_lineage_filter_native_endemic(monkeypatch):
             ]}
         return {"results": []}
 
-    def fake_nativity(session, taxon_id, nativity_place_id=None):
+    def fake_nativity(session, taxon_id, nativity_place_id=None, api_version='v1'):
         label = "Introduced" if int(taxon_id) == 2 else "Native"
         return (label, nativity_place_id)
 
@@ -361,7 +491,7 @@ def test_coming_soon_lineage_filter_native_keeps_unknown(monkeypatch):
             ]}
         return {"results": []}
 
-    def fake_nativity(session, taxon_id, nativity_place_id=None):
+    def fake_nativity(session, taxon_id, nativity_place_id=None, api_version='v1'):
         mapping = {1: "Native", 2: "Unknown", 3: "Introduced"}
         return (mapping.get(int(taxon_id), "Unknown"), nativity_place_id)
 
@@ -375,6 +505,29 @@ def test_coming_soon_lineage_filter_native_keeps_unknown(monkeypatch):
     assert not res.empty
     # Native + Unknown kept; Introduced dropped
     assert set(res['taxon.id'].astype(int).tolist()) == {1, 2}
+
+
+def test_annotate_taxon_nativity_forwards_api_version(monkeypatch):
+    import helpers as h
+
+    seen = {'api_version': None}
+
+    def fake_batch_lookup(session, taxon_ids, nativity_place_id=None, chunk_size=100, api_version='v1'):
+        seen['api_version'] = api_version
+        return {tid: 'Native' for tid in taxon_ids}
+
+    monkeypatch.setattr(h, '_batch_lookup_nativity', fake_batch_lookup)
+    frame = pd.DataFrame({'taxon_id': [1, 2]})
+
+    out = h.annotate_taxon_nativity(
+        frame,
+        nativity_place_id=1297,
+        session=object(),
+        api_version='v2',
+    )
+
+    assert out['nativity'].tolist() == ['Native', 'Native']
+    assert seen['api_version'] == 'v2'
 
 
 def test_taxa_for_kind_plants_uses_taxon_id():
@@ -404,7 +557,7 @@ def test_resolve_nativity_place_id_auto_from_places():
 def test_resolve_nativity_place_id_auto_from_loc(monkeypatch):
     import helpers as h
 
-    monkeypatch.setattr(h, '_derive_place_id_from_location', lambda session, lat, lng: 54321)
+    monkeypatch.setattr(h, '_derive_place_id_from_location', lambda session, lat, lng, api_version='v1': 54321)
     session = object()
     resolved = h._resolve_nativity_place_id(session=session, nativity_place_id='auto', places=None, loc=(37.6, -77.8, 25))
     assert resolved == 54321
@@ -673,7 +826,7 @@ def test_annotate_taxon_nativity_reuses_cache(monkeypatch):
 
     calls = []
 
-    def fake_batch_lookup(session, taxon_ids, nativity_place_id=None, chunk_size=100):
+    def fake_batch_lookup(session, taxon_ids, nativity_place_id=None, chunk_size=100, api_version='v1'):
         calls.append((sorted(taxon_ids), nativity_place_id))
         return {tid: 'Native' for tid in taxon_ids}
 

@@ -90,6 +90,31 @@ Fallback behavior:
 - When `pyinaturalist` is unavailable, helper queries fall back to direct REST calls.
 - Fallback calls are bounded by `per_page` and `max_pages` to avoid unbounded network fetches.
 
+## API Version Trials (v1/v2)
+
+The default API version is `v1`. You can trial `v2` in two ways:
+
+1. Environment default for the process:
+
+```bash
+set INAT_API_VERSION=v2
+uv run --extra dev pytest -q
+```
+
+2. Per-call override in helper functions:
+
+```python
+from helpers import coming_soon, get_park_data, get_observation_rows
+
+df = coming_soon("birds", loc=(37.66, -77.88, 25), api_version="v2")
+parks = get_park_data((37.66, -77.88, 5), "plants", limit=20, api_version="v2")
+obs = get_observation_rows(project_id="some-project", per_page=50, max_pages=2, api_version="v2")
+```
+
+Notes:
+- Keep tests mocked for API behavior; avoid relying on live API responses.
+- Roll out v2 incrementally and compare output schema where notebook/dataframe stability matters.
+
 Exploratory notebook prototypes:
 - `notebooks/exploratory/va_piedmont_native_phenology.ipynb`: native Lepidoptera prevalence and life-stage exploration for the Virginia Piedmont project.
 - `notebooks/exploratory/va_piedmont_identification_timing.ipynb`: observation volume, first non-owner identification volume, and delay summaries over time.

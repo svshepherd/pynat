@@ -39,6 +39,7 @@ except Exception:  # pragma: no cover
         return x
 
 BASE = "https://api.inaturalist.org/v1"
+DEFAULT_INAT_API_VERSION = (os.environ.get("INAT_API_VERSION", "v1") or "v1").strip("/")
 PER_PAGE = 200
 SLEEP = 0.2  # seconds between paginated calls
 DEFAULT_CACHE_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -76,7 +77,8 @@ class INatClient:
 
     def __init__(
         self,
-        base=BASE,
+        base: Optional[str] = None,
+        api_version: str = DEFAULT_INAT_API_VERSION,
         per_page=PER_PAGE,
         sleep=SLEEP,
         max_retries: int = 4,
@@ -84,7 +86,7 @@ class INatClient:
         backoff_cap_seconds: float = 90.0,
         retry_statuses: Optional[Set[int]] = None,
     ):
-        self.base = base
+        self.base = base or f"https://api.inaturalist.org/{api_version}"
         self.per_page = per_page
         self.sleep = sleep
         self.max_retries = max_retries

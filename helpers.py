@@ -42,6 +42,7 @@ except Exception:
     ipyplot = None
     HAS_IPYPLOT = False
 import logging
+from inat_api import INatAPIClient
 try:
     from IPython.display import HTML, display, Markdown
     HAS_IPYTHON_DISPLAY = True
@@ -56,6 +57,7 @@ logger = logging.getLogger(__name__)
 VERTEBRATES_TAXON_ID = 355675
 PHENOTYPE_IMAGE_KINDS = {'flowers', 'fruits', 'butterflies', 'caterpillars'}
 DEFAULT_NATIVITY_PLACE_ID = 1297  # Virginia
+DEFAULT_INAT_API_VERSION = (os.environ.get('INAT_API_VERSION', 'v1') or 'v1').strip('/')
 OBSERVATION_ROW_COLUMNS = [
     'obs_id',
     'observed_on',
@@ -129,10 +131,16 @@ OBSERVATION_FIELDS_MINIMAL = {
 }
 
 
+def _inat_client(session: Optional[requests.Session], api_version: str = DEFAULT_INAT_API_VERSION) -> INatAPIClient:
+    """Return the shared iNaturalist API client bound to an optional session."""
+    return INatAPIClient(session=session, api_version=api_version)
+
+
 def _derive_place_id_from_location(
     session: requests.Session,
     lat: float,
     lng: float,
+    api_version: str = DEFAULT_INAT_API_VERSION,
 ) -> Optional[int]:
     """Derive a regional iNaturalist place ID from geographic coordinates.
 
@@ -145,11 +153,9 @@ def _derive_place_id_from_location(
     level if no state-level place exists.  Returns ``None`` on any network or
     parsing failure so callers can degrade gracefully.
     """
-    endpoint = 'https://api.inaturalist.org/v1/places/nearby'
+    client = _inat_client(session, api_version=api_version)
     try:
-        response = session.get(endpoint, params={'lat': lat, 'lng': lng, 'per_page': 30}, timeout=20)
-        response.raise_for_status()
-        nearby = response.json().get('results', [])
+        nearby = client.places_nearby(params={'lat': lat, 'lng': lng, 'per_page': 30}, timeout=20).get('results', [])
     except Exception as e:
         logger.debug('Failed to derive nativity place from location (%s,%s): %s', lat, lng, e)
         return None
@@ -176,6 +182,7 @@ def _resolve_nativity_place_id(
     nativity_place_id: Union[int, str, None],
     places: Optional[list[int]],
     loc: Optional[tuple[float, float, float]],
+    api_version: str = DEFAULT_INAT_API_VERSION,
 ) -> Optional[int]:
     """Resolve the place ID to use when classifying a taxon's nativity status.
 
@@ -199,7 +206,7 @@ def _resolve_nativity_place_id(
         if places and len(places) > 0:
             return int(places[0])
         if isinstance(loc, tuple) and len(loc) == 3:
-            return _derive_place_id_from_location(session=session, lat=float(loc[0]), lng=float(loc[1]))
+            return _derive_place_id_from_location(session=session, lat=float(loc[0]), lng=float(loc[1]), api_version=api_version)
         # No location context — return None (global scope); the ancestor crawl
         # in _lookup_nativity_via_species_counts handles regional resolution.
         return None
@@ -211,6 +218,7 @@ def _get_ancestor_place_ids(
     session: requests.Session,
     place_id: int,
     max_admin_level: int = 10,
+    api_version: str = DEFAULT_INAT_API_VERSION,
 ) -> list[int]:
     """Return ancestor place IDs for a place, ordered from most-specific to broadest.
 
@@ -230,12 +238,10 @@ def _get_ancestor_place_ids(
 
     Returns an empty list on any error.
     """
-    endpoint = f'https://api.inaturalist.org/v1/places/{int(place_id)}'
     session_to_use = session or requests.Session()
+    client = _inat_client(session_to_use, api_version=api_version)
     try:
-        response = session_to_use.get(endpoint, timeout=12)
-        response.raise_for_status()
-        results = response.json().get('results', [])
+        results = client.places(place_id=int(place_id), timeout=12).get('results', [])
         if not results:
             return []
         place = results[0] if isinstance(results[0], dict) else {}
@@ -246,13 +252,9 @@ def _get_ancestor_place_ids(
 
         # Fetch the ancestor records to filter by admin_level.
         ids_param = ','.join(str(a) for a in ancestor_ids)
-        bulk_resp = session_to_use.get(
-            'https://api.inaturalist.org/v1/places/' + ids_param,
-            timeout=12,
-        )
-        bulk_resp.raise_for_status()
+        bulk_payload = client.get_json(f'places/{ids_param}', timeout=12)
         level_map: dict[int, Optional[int]] = {}
-        for rec in bulk_resp.json().get('results', []):
+        for rec in bulk_payload.get('results', []):
             if isinstance(rec, dict) and rec.get('id') is not None:
                 level_map[int(rec['id'])] = rec.get('admin_level')
 
@@ -339,6 +341,7 @@ def _get_filtered_photo_url(
     place_filters: dict,
     time_filters: list[dict],
     fallback_url: Optional[str],
+    api_version: str = DEFAULT_INAT_API_VERSION,
 ) -> Optional[str]:
     """Return a photo URL that shows the taxon in the appropriate phenological state.
 
@@ -365,13 +368,12 @@ def _get_filtered_photo_url(
         if key in taxa_filters:
             query_params[key] = taxa_filters[key]
 
-    endpoint = 'https://api.inaturalist.org/v1/observations'
+    client = _inat_client(session, api_version=api_version)
 
     def _query_one(params: dict) -> Optional[str]:
         try:
-            response = session.get(endpoint, params=params, timeout=30)
-            response.raise_for_status()
-            for observation in response.json().get('results', []):
+            payload = client.observations(params=params, timeout=30)
+            for observation in payload.get('results', []):
                 photo_url = _extract_photo_url(observation)
                 if photo_url:
                     return photo_url
@@ -434,6 +436,7 @@ def _lookup_nativity_via_species_counts(
     session: requests.Session,
     taxon_id: int,
     nativity_place_id: Optional[int] = None,
+    api_version: str = DEFAULT_INAT_API_VERSION,
 ) -> tuple[str, Optional[int]]:
     """Classify nativity for one taxon, crawling parent regions if needed.
 
@@ -455,16 +458,15 @@ def _lookup_nativity_via_species_counts(
         'per_page': 0,
     }
 
-    endpoint = 'https://api.inaturalist.org/v1/observations/species_counts'
+    client = _inat_client(session, api_version=api_version)
     status_order = [('endemic', 'Endemic'), ('introduced', 'Introduced'), ('native', 'Native')]
 
     def _search_statuses(query_base: dict) -> Optional[str]:
         for key, label in status_order:
             params = {**query_base, key: 'true'}
             try:
-                response = session.get(endpoint, params=params, timeout=20)
-                response.raise_for_status()
-                if response.json().get('total_results', 0) > 0:
+                payload = client.observation_species_counts(params=params, timeout=20)
+                if payload.get('total_results', 0) > 0:
                     return label
             except Exception as e:
                 logger.debug('Nativity lookup failed for taxon %s (%s): %s', taxon_id, key, e)
@@ -493,6 +495,7 @@ def _batch_lookup_nativity(
     taxon_ids: list[int],
     nativity_place_id: Optional[int] = None,
     chunk_size: int = 100,
+    api_version: str = DEFAULT_INAT_API_VERSION,
 ) -> dict[int, str]:
     """Classify nativity for many taxa in bulk using batched species_counts queries.
 
@@ -503,7 +506,7 @@ def _batch_lookup_nativity(
     if not taxon_ids:
         return {}
 
-    endpoint = 'https://api.inaturalist.org/v1/observations/species_counts'
+    client = _inat_client(session, api_version=api_version)
     status_order = [('endemic', 'Endemic'), ('introduced', 'Introduced'), ('native', 'Native')]
     result: dict[int, str] = {}
 
@@ -528,18 +531,15 @@ def _batch_lookup_nativity(
                 key: 'true',
             }
             try:
-                response = session.get(endpoint, params=params, timeout=20)
-                response.raise_for_status()
-                payload = response.json()
+                payload = client.observation_species_counts(params=params, timeout=20)
                 # per_page=0 means results list is empty, but total_results > 0
                 # tells us *at least one* taxon in the set has this status.
                 if payload.get('total_results', 0) == 0:
                     continue
                 # Re-query with per_page large enough to get taxon IDs back
                 detail_params = {**params, 'per_page': len(unresolved)}
-                detail_resp = session.get(endpoint, params=detail_params, timeout=20)
-                detail_resp.raise_for_status()
-                for rec in detail_resp.json().get('results', []):
+                detail_payload = client.observation_species_counts(params=detail_params, timeout=20)
+                for rec in detail_payload.get('results', []):
                     tid = rec.get('taxon', {}).get('id') if isinstance(rec.get('taxon'), dict) else rec.get('taxon.id')
                     if tid is not None:
                         tid = int(tid)
@@ -635,7 +635,10 @@ def get_mine(uname: str,
              lookback_in_days: int = None,
              STRT: Optional[dt.date] = None,
              FNSH: Optional[dt.date] = None,
-             api_key: str = None) -> None:
+             api_key: str = None,
+             session: Optional[requests.Session] = None,
+             use_cache: bool = True,
+             api_version: str = DEFAULT_INAT_API_VERSION) -> None:
     """Print observations for ``uname`` and display their photos.
 
     Parameters
@@ -663,9 +666,6 @@ def get_mine(uname: str,
       and do not abort the loop.
     """
     logger.debug('get_mine called for user=%s lookback=%s', uname, lookback_in_days)
-    
-    # Define the base URL for the iNaturalist API
-    base_url = "https://api.inaturalist.org/v1/observations"
 
     # Ensure we have an API key at call time (non-destructive)
     if api_key is None:
@@ -684,12 +684,40 @@ def get_mine(uname: str,
         start_date = STRT
     end_date = FNSH
 
-    response = inat.get_observations(user_id=[uname],
-                                     d1=start_date,
-                                     d2=end_date,
-                                     page='all')
+    if HAS_PYINAT:
+        response = inat.get_observations(
+            user_id=[uname],
+            d1=start_date,
+            d2=end_date,
+            page='all',
+        )
+        observations = response.get('results', []) if isinstance(response, dict) else []
+    else:
+        session_to_use = session or get_inat_session(token=api_key, use_cache=use_cache)
+        client = _inat_client(session_to_use, api_version=api_version)
+        observations = []
+        per_page = 200
+        page = 1
+        while True:
+            payload = client.observations(
+                params={
+                    'user_id': uname,
+                    'd1': str(start_date),
+                    'd2': str(end_date),
+                    'page': page,
+                    'per_page': per_page,
+                },
+                timeout=30,
+            )
+            page_results = payload.get('results', []) if isinstance(payload, dict) else []
+            if not page_results:
+                break
+            observations.extend(page_results)
+            if len(page_results) < per_page:
+                break
+            page += 1
 
-    df = pd.json_normalize(response.get('results', []))
+    df = pd.json_normalize(observations)
     try:
         df.sort_values('observed_on', inplace=True)
     except Exception as e:
@@ -708,11 +736,20 @@ def get_mine(uname: str,
             date_str = str(observed_on)
 
         taxon_name = row.get('taxon.name', 'Unknown')
+        if (pd.isna(taxon_name) or not str(taxon_name).strip()) and isinstance(row.get('taxon'), dict):
+            taxon_name = row.get('taxon', {}).get('name', 'Unknown')
         species_guess = row.get('species_guess', 'Unknown')
+        if pd.isna(species_guess) or not str(species_guess).strip():
+            species_guess = row.get('taxon.preferred_common_name') or row.get('taxon_preferred_common_name') or 'Unknown'
         obs_id = row.get('id')
         print(f"\n\n{date_str} {taxon_name} ({species_guess}) [inat obs id: {obs_id}]   ref: www.inaturalist.org/observations/{obs_id}")
 
         photos = row.get('photos') if isinstance(row.get('photos'), list) else []
+        if not photos and isinstance(row.get('observation_photos'), list):
+            photos = [
+                (item.get('photo') if isinstance(item, dict) and isinstance(item.get('photo'), dict) else item)
+                for item in row.get('observation_photos')
+            ]
         if not photos:
             logger.debug('No photos for observation %s', obs_id)
             continue
@@ -1067,7 +1104,8 @@ def get_observation_rows(kind: str = 'any',
                          observation_fields: Optional[dict] = 'default',
                          token: Optional[str] = None,
                          session: Optional[requests.Session] = None,
-                         use_cache: bool = True) -> pd.DataFrame:
+                         use_cache: bool = True,
+                         api_version: str = DEFAULT_INAT_API_VERSION) -> pd.DataFrame:
     """Fetch observation-level rows for exploratory notebook analyses.
 
     Parameters mirror a subset of iNaturalist observation filters and return a
@@ -1097,18 +1135,15 @@ def get_observation_rows(kind: str = 'any',
     )
     if session is None:
         session = get_inat_session(token=token, use_cache=use_cache)
+    client = _inat_client(session, api_version=api_version)
 
     resolved_fields = OBSERVATION_FIELDS_MINIMAL if observation_fields == 'default' else observation_fields
     fields_json = json.dumps(resolved_fields) if resolved_fields is not None else None
 
-    obs_url = 'https://api.inaturalist.org/v1/observations'
-
     # Preflight: per_page=0 count check to size pagination and warn on truncation
     preflight_params = _rest_params_from_query({**query, 'per_page': 0})
     try:
-        preflight_resp = session.get(obs_url, params=preflight_params, timeout=30)
-        preflight_resp.raise_for_status()
-        total_results = preflight_resp.json().get('total_results', None)
+        total_results = client.observations(params=preflight_params, timeout=30).get('total_results', None)
     except Exception:
         total_results = None
 
@@ -1137,9 +1172,7 @@ def get_observation_rows(kind: str = 'any',
         params = _rest_params_from_query({**query, 'page': page, 'per_page': per_page_value})
         if fields_json is not None:
             params['fields'] = fields_json
-        response = session.get(obs_url, params=params, timeout=30)
-        response.raise_for_status()
-        payload = response.json()
+        payload = client.observations(params=params, timeout=30)
 
         results = payload.get('results', []) if isinstance(payload, dict) else []
         if not results:
@@ -1175,7 +1208,8 @@ def annotate_taxon_nativity(observations: pd.DataFrame,
                             nativity_place_id: Optional[int] = DEFAULT_NATIVITY_PLACE_ID,
                             token: Optional[str] = None,
                             session: Optional[requests.Session] = None,
-                            use_cache: bool = True) -> pd.DataFrame:
+                            use_cache: bool = True,
+                            api_version: str = DEFAULT_INAT_API_VERSION) -> pd.DataFrame:
     """Add a ``nativity`` column to an observations DataFrame.
 
     Looks up each unique taxon ID via :func:`_batch_lookup_nativity` (which
@@ -1205,6 +1239,7 @@ def annotate_taxon_nativity(observations: pd.DataFrame,
         session=session,
         taxon_ids=unique_ids,
         nativity_place_id=nativity_place_id,
+        api_version=api_version,
     )
     labels = []
     for value in out[taxon_id_col]:
@@ -1283,6 +1318,7 @@ def _find_state_place_id(
     session: requests.Session,
     places: Optional[list[int]],
     loc: Optional[tuple[float, float, float]],
+    api_version: str = DEFAULT_INAT_API_VERSION,
 ) -> Optional[int]:
     """Return the state/province-level iNaturalist place ID for a query context.
 
@@ -1304,12 +1340,10 @@ def _find_state_place_id(
     """
     if places:
         pid = int(places[0])
+        client = _inat_client(session, api_version=api_version)
         # Check whether the query place itself is already a state.
-        endpoint = f'https://api.inaturalist.org/v1/places/{pid}'
         try:
-            resp = session.get(endpoint, timeout=12)
-            resp.raise_for_status()
-            results = resp.json().get('results', [])
+            results = client.places(place_id=pid, timeout=12).get('results', [])
             if results and isinstance(results[0], dict):
                 if results[0].get('admin_level') == 10:
                     return pid
@@ -1318,13 +1352,13 @@ def _find_state_place_id(
 
         # Walk ancestors filtered to admin_level >= 10 (most-specific first).
         # The broadest entry in this filtered list is the state.
-        ancestors = _get_ancestor_place_ids(session, pid, max_admin_level=10)
+        ancestors = _get_ancestor_place_ids(session, pid, max_admin_level=10, api_version=api_version)
         if ancestors:
             return ancestors[-1]
         return None
 
     if loc is not None:
-        return _derive_place_id_from_location(session, float(loc[0]), float(loc[1]))
+        return _derive_place_id_from_location(session, float(loc[0]), float(loc[1]), api_version=api_version)
 
     return None
 
@@ -1343,6 +1377,7 @@ def coming_soon(kind: str = 'any',
                 lineage_filter: str = 'any',
                 nativity_place_id: Union[int, str, None] = 'auto',
                 unknown_retry_threshold: float = 0.5,
+                api_version: str = DEFAULT_INAT_API_VERSION,
                 ) -> pd.DataFrame:
     """Return nearby seasonal/common taxa, optionally normalized.
 
@@ -1434,12 +1469,14 @@ def coming_soon(kind: str = 'any',
     # Prepare session if needed (fallback path)
     if session is None:
         session = get_inat_session(token=token, use_cache=use_cache)
+    client = _inat_client(session, api_version=api_version)
 
     resolved_nativity_place_id = _resolve_nativity_place_id(
         session=session,
         nativity_place_id=nativity_place_id,
         places=places,
         loc=loc,
+        api_version=api_version,
     )
 
     results = []
@@ -1452,15 +1489,13 @@ def coming_soon(kind: str = 'any',
             frames = pd.json_normalize(resp.get('results', []))
         else:
             # fallback to direct REST API; use API defaults unless paging overrides are provided
-            url = "https://api.inaturalist.org/v1/observations/species_counts"
             if max_pages_value is None:
                 params = {**taxa, **t, **place, 'verifiable': 'true'}
                 if per_page_value is not None:
                     params['per_page'] = per_page_value
                 try:
-                    r = session.get(url, params=params, timeout=30)
-                    r.raise_for_status()
-                    frames = pd.json_normalize(r.json().get('results', []))
+                    payload = client.observation_species_counts(params=params, timeout=30)
+                    frames = pd.json_normalize(payload.get('results', []))
                 except Exception as e:
                     logger.warning('Failed REST call for observation_species_counts: %s', e)
                     frames = pd.DataFrame()
@@ -1471,9 +1506,8 @@ def coming_soon(kind: str = 'any',
                     if per_page_value is not None:
                         params['per_page'] = per_page_value
                     try:
-                        r = session.get(url, params=params, timeout=30)
-                        r.raise_for_status()
-                        page_df = pd.json_normalize(r.json().get('results', []))
+                        payload = client.observation_species_counts(params=params, timeout=30)
+                        page_df = pd.json_normalize(payload.get('results', []))
                         if page_df.empty:
                             break
                         chunk_frames.append(page_df)
@@ -1509,15 +1543,13 @@ def coming_soon(kind: str = 'any',
                     resp = inat.get_observation_species_counts(**count_kwargs)
                     df = pd.json_normalize(resp.get('results', []))
                 else:
-                    url = "https://api.inaturalist.org/v1/observations/species_counts"
                     if max_pages_value is None:
                         params = {**extra_kwargs, 'taxon_id': chunk, 'verifiable': 'true'}
                         if per_page_value is not None:
                             params['per_page'] = per_page_value
                         try:
-                            r = session.get(url, params=params, timeout=30)
-                            r.raise_for_status()
-                            df = pd.json_normalize(r.json().get('results', []))
+                            payload = client.observation_species_counts(params=params, timeout=30)
+                            df = pd.json_normalize(payload.get('results', []))
                         except Exception as e:
                             logger.warning('Failed REST call for chunked observation_species_counts: %s', e)
                             df = pd.DataFrame()
@@ -1528,9 +1560,8 @@ def coming_soon(kind: str = 'any',
                             if per_page_value is not None:
                                 params['per_page'] = per_page_value
                             try:
-                                r = session.get(url, params=params, timeout=30)
-                                r.raise_for_status()
-                                page_df = pd.json_normalize(r.json().get('results', []))
+                                payload = client.observation_species_counts(params=params, timeout=30)
+                                page_df = pd.json_normalize(payload.get('results', []))
                                 if page_df.empty:
                                     break
                                 page_frames.append(page_df)
@@ -1594,6 +1625,7 @@ def coming_soon(kind: str = 'any',
                 place_filters=place,
                 time_filters=time,
                 fallback_url=fallback_url,
+                api_version=api_version,
             )
 
     nativity_cache: dict[int, tuple[str, Optional[int]]] = {}
@@ -1610,6 +1642,7 @@ def coming_soon(kind: str = 'any',
                     session=session,
                     taxon_id=cache_key,
                     nativity_place_id=resolved_nativity_place_id,
+                    api_version=api_version,
                 )
             label, resolved_pid = nativity_cache[cache_key]
             results.at[idx, 'nativity'] = label
@@ -1628,7 +1661,7 @@ def coming_soon(kind: str = 'any',
         ]
         unknown_fraction = len(unknown_indices) / len(results) if len(results) > 0 else 0.0
         if unknown_indices and unknown_fraction >= unknown_retry_threshold:
-            state_pid = _find_state_place_id(session=session, places=places, loc=loc)
+            state_pid = _find_state_place_id(session=session, places=places, loc=loc, api_version=api_version)
             if state_pid is not None and state_pid != resolved_nativity_place_id:
                 logger.info(
                     'Retrying nativity for %d Unknown taxa at state-level place %s '
@@ -1643,6 +1676,7 @@ def coming_soon(kind: str = 'any',
                         session=session,
                         taxon_id=cache_key,
                         nativity_place_id=state_pid,
+                        api_version=api_version,
                     )
                     nativity_cache[cache_key] = (label, resolved_pid)
                     results.at[idx, 'nativity'] = label
@@ -1687,6 +1721,7 @@ def coming_soon(kind: str = 'any',
                     session=session,
                     taxon_id=cache_key,
                     nativity_place_id=resolved_nativity_place_id,
+                    api_version=api_version,
                 )
                 nativity_cache[cache_key] = (_nat_label, _nat_pid)
                 nativity = _nat_label
@@ -1718,7 +1753,7 @@ def coming_soon(kind: str = 'any',
     return results.head(capped_limit).copy()
 
 
-def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = None, session: Optional[requests.Session] = None, use_cache: bool = True, per_page: int = 50, max_pages: int = 5) -> pd.DataFrame:
+def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = None, session: Optional[requests.Session] = None, use_cache: bool = True, per_page: int = 50, max_pages: int = 5, api_version: str = DEFAULT_INAT_API_VERSION) -> pd.DataFrame:
     """Return the most common species in a park, sorted by relative frequency.
 
     Parameters
@@ -1743,6 +1778,7 @@ def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = N
     
     if session is None:
         session = get_inat_session(token=token, use_cache=use_cache)
+    client = _inat_client(session, api_version=api_version)
 
     per_page = max(1, int(per_page))
     max_pages = max(1, int(max_pages))
@@ -1755,14 +1791,12 @@ def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = N
                                                                     verifiable=True,
                                                                     per_page=per_page,)['results'])
     else:
-        url = "https://api.inaturalist.org/v1/observations/species_counts"
         frames = []
         for page in range(1, max_pages + 1):
             params = {**taxa, 'lat': geocenter[0], 'lng': geocenter[1], 'radius': geocenter[2], 'verifiable': 'true', 'per_page': per_page, 'page': page}
             try:
-                r = session.get(url, params=params, timeout=30)
-                r.raise_for_status()
-                page_df = pd.json_normalize(r.json().get('results', []))
+                payload = client.observation_species_counts(params=params, timeout=30)
+                page_df = pd.json_normalize(payload.get('results', []))
                 if page_df.empty:
                     break
                 frames.append(page_df)
@@ -1785,14 +1819,12 @@ def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = N
                 r = inat.get_observation_species_counts(taxon_id=chunk, verifiable=True, per_page=per_page)
                 df = pd.json_normalize(r.get('results', []))
             else:
-                url = "https://api.inaturalist.org/v1/observations/species_counts"
                 page_frames = []
                 for page in range(1, max_pages + 1):
                     params = {'taxon_id': chunk, 'verifiable': 'true', 'per_page': per_page, 'page': page}
                     try:
-                        rr = session.get(url, params=params, timeout=30)
-                        rr.raise_for_status()
-                        page_df = pd.json_normalize(rr.json().get('results', []))
+                        payload = client.observation_species_counts(params=params, timeout=30)
+                        page_df = pd.json_normalize(payload.get('results', []))
                         if page_df.empty:
                             break
                         page_frames.append(page_df)
@@ -1895,7 +1927,7 @@ def _run_coming_soon_query(kind_value: str,
     )
 
 
-def _lookup_place_name(session: Optional[requests.Session], place_id: Optional[int]) -> Optional[str]:
+def _lookup_place_name(session: Optional[requests.Session], place_id: Optional[int], api_version: str = DEFAULT_INAT_API_VERSION) -> Optional[str]:
     """Resolve a human-readable display name for an iNaturalist place ID.
 
     Used to show a friendly label alongside numeric place IDs in the UI.
@@ -1910,12 +1942,10 @@ def _lookup_place_name(session: Optional[requests.Session], place_id: Optional[i
     except (TypeError, ValueError):
         return None
 
-    endpoint = f'https://api.inaturalist.org/v1/places/{pid}'
     session_to_use = session or requests.Session()
+    client = _inat_client(session_to_use, api_version=api_version)
     try:
-        response = session_to_use.get(endpoint, timeout=12)
-        response.raise_for_status()
-        results = response.json().get('results', [])
+        results = client.places(place_id=pid, timeout=12).get('results', [])
         if not results:
             return None
         place = results[0] if isinstance(results[0], dict) else {}
@@ -1931,6 +1961,7 @@ def _search_places(
     session: Optional[requests.Session],
     query: str,
     per_page: int = 10,
+    api_version: str = DEFAULT_INAT_API_VERSION,
 ) -> list[dict[str, Any]]:
     """Search iNaturalist places by name using the autocomplete endpoint.
 
@@ -1939,16 +1970,13 @@ def _search_places(
     """
     if not query or not query.strip():
         return []
-    endpoint = 'https://api.inaturalist.org/v1/places/autocomplete'
     session_to_use = session or requests.Session()
+    client = _inat_client(session_to_use, api_version=api_version)
     try:
-        response = session_to_use.get(
-            endpoint,
+        results = client.places_autocomplete(
             params={'q': query.strip(), 'per_page': per_page},
             timeout=12,
-        )
-        response.raise_for_status()
-        results = response.json().get('results', [])
+        ).get('results', [])
         places = []
         for place in results:
             pid = place.get('id')
