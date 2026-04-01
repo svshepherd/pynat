@@ -87,17 +87,22 @@ class INatAPIClient:
         raise RuntimeError(f"iNaturalist request failed after retries: {url} params={params}") from last_exc
 
     def observations(self, params: Optional[dict[str, Any]] = None, timeout: int = 30) -> dict[str, Any]:
+        """Query ``/observations`` with the given filter parameters."""
         return self.get_json("observations", params=params, timeout=timeout)
 
     def observation_species_counts(self, params: Optional[dict[str, Any]] = None, timeout: int = 30) -> dict[str, Any]:
+        """Query ``/observations/species_counts`` for per-taxon observation totals."""
         return self.get_json("observations/species_counts", params=params, timeout=timeout)
 
     def places(self, place_id: Optional[int] = None, params: Optional[dict[str, Any]] = None, timeout: int = 30) -> dict[str, Any]:
+        """Fetch places via ``/places`` (search) or ``/places/{id}`` (detail)."""
         path = "places" if place_id is None else f"places/{int(place_id)}"
         return self.get_json(path, params=params, timeout=timeout)
 
     def places_nearby(self, params: Optional[dict[str, Any]] = None, timeout: int = 30) -> dict[str, Any]:
+        """Geocode coordinates to nearby places via ``/places/nearby``."""
         return self.get_json("places/nearby", params=params, timeout=timeout)
 
     def places_autocomplete(self, params: Optional[dict[str, Any]] = None, timeout: int = 30) -> dict[str, Any]:
+        """Search places by name via ``/places/autocomplete``."""
         return self.get_json("places/autocomplete", params=params, timeout=timeout)

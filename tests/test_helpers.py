@@ -148,10 +148,11 @@ def test_get_park_data_rest_fallback(monkeypatch):
 
     monkeypatch.setattr(h, "HAS_PYINAT", False)
     session = FakeSession()
-    res = h.get_park_data((0, 0, 1), "any", limit=5, session=session, per_page=10, max_pages=1)
+    res = h.get_park_data((0, 0, 1), "any", limit=5, session=session, per_page=10, max_pages=1, nativity_place_id=None)
     assert isinstance(res, pd.DataFrame)
     assert not res.empty
     assert "taxon.name" in res.columns
+    assert "nativity" in res.columns
 
 
 def test_get_park_data_rest_fallback_uses_v2_endpoint(monkeypatch):
@@ -188,7 +189,7 @@ def test_get_park_data_rest_fallback_uses_v2_endpoint(monkeypatch):
 
     monkeypatch.setattr(h, "HAS_PYINAT", False)
     session = FakeSession()
-    h.get_park_data((0, 0, 1), "any", limit=5, session=session, per_page=10, max_pages=1, api_version='v2')
+    h.get_park_data((0, 0, 1), "any", limit=5, session=session, per_page=10, max_pages=1, api_version='v2', nativity_place_id=None)
     assert any('/v2/observations/species_counts' in url for url in session.urls)
 
 
@@ -402,15 +403,14 @@ def test_coming_soon_lineage_filter_introduced(monkeypatch):
             ]}
         return {"results": []}
 
-    def fake_nativity(session, taxon_id, nativity_place_id=None, api_version='v1'):
-        label = "Introduced" if int(taxon_id) == 2 else "Native"
-        return (label, nativity_place_id)
+    def fake_batch_nativity(session, taxon_ids, nativity_place_id=None, chunk_size=100, api_version='v1'):
+        return {tid: ("Introduced" if tid == 2 else "Native") for tid in taxon_ids}
 
     if not h.HAS_PYINAT:
         pytest.skip("pyinaturalist not installed; this test covers pyinaturalist path")
 
     monkeypatch.setattr(h.inat, "get_observation_species_counts", fake_counts)
-    monkeypatch.setattr(h, "_lookup_nativity_via_species_counts", fake_nativity)
+    monkeypatch.setattr(h, "_batch_lookup_nativity", fake_batch_nativity)
 
     res = h.coming_soon(loc=(0, 0, 1), limit=10, lineage_filter='introduced', nativity_place_id=1297)
     assert not res.empty
@@ -442,15 +442,14 @@ def test_coming_soon_lineage_filter_native_endemic(monkeypatch):
             ]}
         return {"results": []}
 
-    def fake_nativity(session, taxon_id, nativity_place_id=None, api_version='v1'):
-        label = "Introduced" if int(taxon_id) == 2 else "Native"
-        return (label, nativity_place_id)
+    def fake_batch_nativity(session, taxon_ids, nativity_place_id=None, chunk_size=100, api_version='v1'):
+        return {tid: ("Introduced" if tid == 2 else "Native") for tid in taxon_ids}
 
     if not h.HAS_PYINAT:
         pytest.skip("pyinaturalist not installed; this test covers pyinaturalist path")
 
     monkeypatch.setattr(h.inat, "get_observation_species_counts", fake_counts)
-    monkeypatch.setattr(h, "_lookup_nativity_via_species_counts", fake_nativity)
+    monkeypatch.setattr(h, "_batch_lookup_nativity", fake_batch_nativity)
 
     res = h.coming_soon(loc=(0, 0, 1), limit=10, lineage_filter='native_endemic', nativity_place_id=1297)
     assert not res.empty
@@ -491,15 +490,15 @@ def test_coming_soon_lineage_filter_native_keeps_unknown(monkeypatch):
             ]}
         return {"results": []}
 
-    def fake_nativity(session, taxon_id, nativity_place_id=None, api_version='v1'):
+    def fake_batch_nativity(session, taxon_ids, nativity_place_id=None, chunk_size=100, api_version='v1'):
         mapping = {1: "Native", 2: "Unknown", 3: "Introduced"}
-        return (mapping.get(int(taxon_id), "Unknown"), nativity_place_id)
+        return {tid: mapping.get(tid, "Unknown") for tid in taxon_ids}
 
     if not h.HAS_PYINAT:
         pytest.skip("pyinaturalist not installed; this test covers pyinaturalist path")
 
     monkeypatch.setattr(h.inat, "get_observation_species_counts", fake_counts)
-    monkeypatch.setattr(h, "_lookup_nativity_via_species_counts", fake_nativity)
+    monkeypatch.setattr(h, "_batch_lookup_nativity", fake_batch_nativity)
 
     res = h.coming_soon(loc=(0, 0, 1), limit=10, lineage_filter='native_endemic', nativity_place_id=1297)
     assert not res.empty

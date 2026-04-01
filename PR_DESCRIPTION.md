@@ -31,7 +31,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-All tests pass locally: `3 passed`.
+All tests pass locally — run ``uv run --extra dev pytest -q`` for the latest count.
 
 Notes for reviewer
 ------------------

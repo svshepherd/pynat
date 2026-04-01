@@ -17,4 +17,4 @@
 
 ### Notes
 - Test suite is run via `uv` dev extras (for example: `uv run --extra dev pytest -q`).
-- Current local baseline: 27 passing tests.
+- Current local baseline: see ``uv run --extra dev pytest -q`` for latest count.

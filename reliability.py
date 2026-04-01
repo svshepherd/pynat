@@ -32,6 +32,8 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import pandas as pd
 import requests
 
+from inat_api import INatAPIClient
+
 try:
     from tqdm import tqdm
 except Exception:  # pragma: no cover
@@ -64,15 +66,15 @@ def chunks(seq: List, n: int) -> Iterable[List]:
 
 
 # -------------------------
-# API Client (v1)
+# API Client
 # -------------------------
 
-class INatClient:
-    """Thin iNaturalist API v1 client with pagination helpers.
+class INatClient(INatAPIClient):
+    """Extended iNaturalist API client with pagination and retry helpers.
 
-    The client intentionally exposes a narrow subset of endpoints used by this
-    analysis pipeline. Each public method returns raw JSON-like dictionaries so
-    normalization logic remains centralized in ``Analyzer.ingest``.
+    Inherits core retry/backoff logic from :class:`inat_api.INatAPIClient` and
+    adds paginated iteration, windowed identification fetching with 403
+    tolerance, and per-page sleep to stay under rate limits.
     """
 
     def __init__(
@@ -86,59 +88,24 @@ class INatClient:
         backoff_cap_seconds: float = 90.0,
         retry_statuses: Optional[Set[int]] = None,
     ):
-        self.base = base or f"https://api.inaturalist.org/{api_version}"
+        session = requests.Session()
+        session.headers.update({"User-Agent": "inat-reliability/0.2 (+https://github.com/svshepherd/pynat)"})
+        super().__init__(
+            session=session,
+            api_version=api_version,
+            max_retries=max_retries,
+            backoff_base_seconds=backoff_base_seconds,
+            retry_statuses=retry_statuses,
+        )
+        if base is not None:
+            self.base_url = base
         self.per_page = per_page
         self.sleep = sleep
-        self.max_retries = max_retries
-        self.backoff_base_seconds = backoff_base_seconds
         self.backoff_cap_seconds = backoff_cap_seconds
-        self.retry_statuses = retry_statuses or {403, 429, 500, 502, 503, 504}
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "inat-reliability/0.2 (+https://github.com/svshepherd/pynat)"})
-
-    def _retry_delay_seconds(self, attempt_number: int, response: Optional[requests.Response] = None) -> float:
-        if response is not None:
-            retry_after = response.headers.get("Retry-After")
-            if retry_after:
-                try:
-                    return max(0.0, float(retry_after))
-                except ValueError:
-                    pass
-        exp = self.backoff_base_seconds * (2 ** max(0, attempt_number - 1))
-        return min(self.backoff_cap_seconds, exp)
 
     def _get(self, endpoint: str, params: Dict) -> Dict:
-        url = f"{self.base}/{endpoint}"
-        last_exc: Optional[Exception] = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                r = self.session.get(url, params=params, timeout=60)
-            except requests.RequestException as e:
-                last_exc = e
-                if attempt >= self.max_retries:
-                    break
-                delay = self._retry_delay_seconds(attempt + 1)
-                log(f"Request error for {endpoint}; retrying in {delay:.1f}s ({attempt + 1}/{self.max_retries})")
-                time.sleep(delay)
-                continue
-
-            if r.status_code in self.retry_statuses:
-                if attempt >= self.max_retries:
-                    r.raise_for_status()
-                delay = self._retry_delay_seconds(attempt + 1, response=r)
-                log(
-                    f"HTTP {r.status_code} for {endpoint}; retrying in {delay:.1f}s "
-                    f"({attempt + 1}/{self.max_retries})"
-                )
-                time.sleep(delay)
-                continue
-
-            r.raise_for_status()
-            return r.json()
-
-        raise RuntimeError(
-            f"iNaturalist API request failed after retries for endpoint '{endpoint}' with params {params}."
-        ) from last_exc
+        """Delegate to inherited :meth:`get_json`, matching the legacy signature."""
+        return self.get_json(endpoint, params=params, timeout=60)
 
     def paged(self, endpoint: str, params: Dict) -> Iterable[Dict]:
         page = 1
@@ -857,9 +824,15 @@ class Analyzer:
         place_ids: Optional[List[int]] = None,
         bbox: Optional[Tuple[float, float, float, float]] = None,
     ) -> pd.DataFrame:
-        """Build proposal rows from in-memory observation and timeline tables.
+        """Build proposal rows from in-memory observation and identification tables.
 
-        Date/time handling in this method is normalized to UTC.
+        Scans the user's identification sequence per observation to detect
+        proposal boundaries, then walks later identifications looking for
+        confirmations.  Each proposal row records the proposed taxon,
+        confirmation status, correctness depth vs. the final community taxon,
+        and a derived overall status (vindicated / overruled / withdrawn / …).
+
+        All datetime values are normalized to UTC before comparison.
         """
         if df_all.empty or df_obs.empty:
             return pd.DataFrame()

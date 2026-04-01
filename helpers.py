@@ -1,13 +1,17 @@
-"""Helper utilities wrapping pyinaturalist for small analysis tasks.
+"""Helper utilities for iNaturalist observation and species analysis.
 
-This module provides convenience functions for loading a local iNaturalist
-API key, fetching a user's observations and nearby seasonal/common species,
-and summarizing park-level species frequency. Changes here emphasize:
-- runtime key loading (no import-time side effects)
-- robust handling of missing fields from API responses
-- non-blocking image display and safe normalization logic
+This module provides convenience functions for loading an iNaturalist API key,
+fetching observations, querying nearby seasonal/common species, classifying
+taxon nativity, and summarizing park-level species frequency.  The primary
+network path uses direct REST calls via :class:`inat_api.INatAPIClient`;
+``pyinaturalist`` is used as an optional fallback when installed.
 
-Logging: the module uses a package-level `logger`. Do not call
+Design choices:
+- Runtime key loading (no import-time side effects).
+- Robust handling of missing fields from API responses.
+- Non-blocking image display and safe normalization logic.
+
+Logging: the module uses a package-level ``logger``. Do not call
 ``logging.basicConfig`` in libraries; configure logging in your application.
 """
 
@@ -127,6 +131,24 @@ OBSERVATION_FIELDS_MINIMAL = {
     },
     'observation_photos': {
         'photo': {'url': True},
+    },
+}
+
+# Minimal v2 field set for /observations/species_counts.  Requesting inline
+# establishment_means lets _infer_nativity_from_row resolve nativity with
+# zero extra API calls for taxa that have this data in iNaturalist.
+SPECIES_COUNTS_FIELDS_V2 = {
+    'count': True,
+    'taxon': {
+        'id': True,
+        'name': True,
+        'preferred_common_name': True,
+        'wikipedia_url': True,
+        'default_photo': {'medium_url': True},
+        'establishment_means': {
+            'establishment_means': True,
+            'place': {'id': True},
+        },
     },
 }
 
@@ -560,6 +582,76 @@ def _batch_lookup_nativity(
 def _format_photo_title(common_name: str, scientific_name: str, nativity: str) -> str:
     """Format a multi-line matplotlib axes title for a species photo."""
     return f"{common_name}\n{scientific_name}\nNativity: {nativity}"
+
+
+def _chunked_species_counts(
+    client: INatAPIClient,
+    taxon_ids: list[int],
+    extra_kwargs: Optional[dict[str, Any]] = None,
+    chunk_size: int = 100,
+    per_page: Optional[int] = None,
+    max_pages: Optional[int] = None,
+) -> pd.DataFrame:
+    """Fetch ``species_counts`` for a list of taxon IDs in batched chunks.
+
+    Issues one or more ``/observations/species_counts`` calls per chunk,
+    paginating when *max_pages* is set.  Falls back to ``pyinaturalist`` when
+    available.  Returns a single concatenated :class:`~pandas.DataFrame` of
+    ``json_normalize``-d results (empty DataFrame when nothing is found).
+
+    When the client is configured for API v2, the ``SPECIES_COUNTS_FIELDS_V2``
+    field set is automatically included so that responses carry inline
+    ``taxon.establishment_means`` where available.
+    """
+    extra_kwargs = extra_kwargs or {}
+    # Inject v2 fields when applicable so responses include establishment_means.
+    if getattr(client, 'api_version', 'v1') == 'v2' and 'fields' not in extra_kwargs:
+        import json as _json
+        extra_kwargs = {**extra_kwargs, 'fields': _json.dumps(SPECIES_COUNTS_FIELDS_V2)}
+    frames: list[pd.DataFrame] = []
+
+    for i in range(0, len(taxon_ids), chunk_size):
+        chunk = taxon_ids[i:i + chunk_size]
+        if HAS_PYINAT:
+            count_kwargs: dict[str, Any] = {'taxon_id': chunk, 'verifiable': True, **extra_kwargs}
+            if per_page is not None:
+                count_kwargs['per_page'] = per_page
+            resp = inat.get_observation_species_counts(**count_kwargs)
+            df = pd.json_normalize(resp.get('results', []))
+        else:
+            if max_pages is None:
+                params: dict[str, Any] = {**extra_kwargs, 'taxon_id': chunk, 'verifiable': 'true'}
+                if per_page is not None:
+                    params['per_page'] = per_page
+                try:
+                    payload = client.observation_species_counts(params=params, timeout=30)
+                    df = pd.json_normalize(payload.get('results', []))
+                except Exception as e:
+                    logger.warning('Failed REST call for chunked observation_species_counts: %s', e)
+                    df = pd.DataFrame()
+            else:
+                page_frames: list[pd.DataFrame] = []
+                for page in range(1, max_pages + 1):
+                    params = {**extra_kwargs, 'taxon_id': chunk, 'verifiable': 'true', 'page': page}
+                    if per_page is not None:
+                        params['per_page'] = per_page
+                    try:
+                        payload = client.observation_species_counts(params=params, timeout=30)
+                        page_df = pd.json_normalize(payload.get('results', []))
+                        if page_df.empty:
+                            break
+                        page_frames.append(page_df)
+                        if per_page is not None and len(page_df) < per_page:
+                            break
+                    except Exception as e:
+                        logger.warning('Failed REST call for chunked observation_species_counts: %s', e)
+                        break
+                df = pd.concat(page_frames, ignore_index=True) if page_frames else pd.DataFrame()
+        if not df.empty:
+            frames.append(df)
+
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
 
 def load_api_key(fallback_path: str = 'pyinaturalistkey.pkd') -> Union[str, None]:
     """Load an iNaturalist API key from multiple sources.
@@ -1381,6 +1473,9 @@ def coming_soon(kind: str = 'any',
                 ) -> pd.DataFrame:
     """Return nearby seasonal/common taxa, optionally normalized.
 
+    When neither ``places`` nor ``loc`` is provided, defaults to
+    ``loc=(37.6669, -77.8883, 25)`` (Richmond, VA area).
+
     Parameters
     ----------
     kind:
@@ -1480,6 +1575,11 @@ def coming_soon(kind: str = 'any',
     )
 
     results = []
+    # When using API v2, include the field set with inline establishment_means.
+    _v2_fields: dict[str, Any] = {}
+    if api_version == 'v2':
+        import json as _json
+        _v2_fields = {'fields': _json.dumps(SPECIES_COUNTS_FIELDS_V2)}
     for t in time:
         if HAS_PYINAT:
             species_count_kwargs = {'verifiable': True, **taxa, **t, **place}
@@ -1490,7 +1590,7 @@ def coming_soon(kind: str = 'any',
         else:
             # fallback to direct REST API; use API defaults unless paging overrides are provided
             if max_pages_value is None:
-                params = {**taxa, **t, **place, 'verifiable': 'true'}
+                params = {**taxa, **t, **place, **_v2_fields, 'verifiable': 'true'}
                 if per_page_value is not None:
                     params['per_page'] = per_page_value
                 try:
@@ -1502,7 +1602,7 @@ def coming_soon(kind: str = 'any',
             else:
                 chunk_frames = []
                 for page in range(1, max_pages_value + 1):
-                    params = {**taxa, **t, **place, 'verifiable': 'true', 'page': page}
+                    params = {**taxa, **t, **place, **_v2_fields, 'verifiable': 'true', 'page': page}
                     if per_page_value is not None:
                         params['per_page'] = per_page_value
                     try:
@@ -1531,50 +1631,6 @@ def coming_soon(kind: str = 'any',
         # prepare taxon id list and helper for chunked API calls
         taxon_ids = results['taxon.id'].dropna().astype(int).tolist()
 
-        def _chunked_get_counts(taxon_ids_list, chunk_size=100, extra_kwargs=None):
-            frames = []
-            extra_kwargs = extra_kwargs or {}
-            for i in range(0, len(taxon_ids_list), chunk_size):
-                chunk = taxon_ids_list[i:i + chunk_size]
-                if HAS_PYINAT:
-                    count_kwargs = {'taxon_id': chunk, 'verifiable': True, **extra_kwargs}
-                    if per_page_value is not None:
-                        count_kwargs['per_page'] = per_page_value
-                    resp = inat.get_observation_species_counts(**count_kwargs)
-                    df = pd.json_normalize(resp.get('results', []))
-                else:
-                    if max_pages_value is None:
-                        params = {**extra_kwargs, 'taxon_id': chunk, 'verifiable': 'true'}
-                        if per_page_value is not None:
-                            params['per_page'] = per_page_value
-                        try:
-                            payload = client.observation_species_counts(params=params, timeout=30)
-                            df = pd.json_normalize(payload.get('results', []))
-                        except Exception as e:
-                            logger.warning('Failed REST call for chunked observation_species_counts: %s', e)
-                            df = pd.DataFrame()
-                    else:
-                        page_frames = []
-                        for page in range(1, max_pages_value + 1):
-                            params = {**extra_kwargs, 'taxon_id': chunk, 'verifiable': 'true', 'page': page}
-                            if per_page_value is not None:
-                                params['per_page'] = per_page_value
-                            try:
-                                payload = client.observation_species_counts(params=params, timeout=30)
-                                page_df = pd.json_normalize(payload.get('results', []))
-                                if page_df.empty:
-                                    break
-                                page_frames.append(page_df)
-                                if per_page_value is not None and len(page_df) < per_page_value:
-                                    break
-                            except Exception as e:
-                                logger.warning('Failed REST call for chunked observation_species_counts: %s', e)
-                                break
-                        df = pd.concat(page_frames, ignore_index=True) if page_frames else pd.DataFrame()
-                if not df.empty:
-                    frames.append(df)
-            return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
         if not taxon_ids:
             results['normalizer'] = np.nan
             results['sorter'] = 0
@@ -1588,7 +1644,7 @@ def coming_soon(kind: str = 'any',
                 # location during this same seasonal window in any year?
                 frames = []
                 for t in time:
-                    df = _chunked_get_counts(taxon_ids, extra_kwargs={**extra, **t})
+                    df = _chunked_species_counts(client, taxon_ids, extra_kwargs={**extra, **t}, per_page=per_page_value, max_pages=max_pages_value)
                     if not df.empty:
                         frames.append(df)
                 normer_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -1600,7 +1656,7 @@ def coming_soon(kind: str = 'any',
                 #   dates and places (surfaces locally rare but globally common
                 #   species less prominently).
                 extra_kwargs = place if norm == 'time' else {}
-                normer_df = _chunked_get_counts(taxon_ids, extra_kwargs=extra_kwargs)
+                normer_df = _chunked_species_counts(client, taxon_ids, extra_kwargs=extra_kwargs, per_page=per_page_value, max_pages=max_pages_value)
 
             if not normer_df.empty and 'taxon.id' in normer_df.columns:
                 normer_series = normer_df.groupby('taxon.id', as_index=True)['count'].sum()
@@ -1628,59 +1684,73 @@ def coming_soon(kind: str = 'any',
                 api_version=api_version,
             )
 
-    nativity_cache: dict[int, tuple[str, Optional[int]]] = {}
+    nativity_cache: dict[int, str] = {}
     if not results.empty:
+        # First try: infer nativity from species_counts response columns
+        # (works when establishment_means are present, e.g. v2 with fields).
+        for idx in results.index:
+            taxon_id = results.at[idx, 'taxon.id']
+            if pd.isna(taxon_id):
+                continue
+            inferred = _infer_nativity_from_row(results.loc[idx])
+            if inferred:
+                nativity_cache[int(taxon_id)] = inferred
+
+        # Batch lookup for all taxa not yet resolved.
+        all_taxon_ids = [int(t) for t in results['taxon.id'].dropna().unique()]
+        unresolved_ids = [t for t in all_taxon_ids if t not in nativity_cache]
+        if unresolved_ids:
+            batch_result = _batch_lookup_nativity(
+                session=session,
+                taxon_ids=unresolved_ids,
+                nativity_place_id=resolved_nativity_place_id,
+                api_version=api_version,
+            )
+            nativity_cache.update(batch_result)
+
+        # Map results back onto the DataFrame.
         for idx in results.index:
             taxon_id = results.at[idx, 'taxon.id']
             if pd.isna(taxon_id):
                 results.at[idx, 'nativity'] = 'Unknown'
                 results.at[idx, 'nativity_place_id'] = None
-                continue
-            cache_key = int(taxon_id)
-            if cache_key not in nativity_cache:
-                nativity_cache[cache_key] = _lookup_nativity_via_species_counts(
-                    session=session,
-                    taxon_id=cache_key,
-                    nativity_place_id=resolved_nativity_place_id,
-                    api_version=api_version,
-                )
-            label, resolved_pid = nativity_cache[cache_key]
-            results.at[idx, 'nativity'] = label
-            results.at[idx, 'nativity_place_id'] = resolved_pid
+            else:
+                results.at[idx, 'nativity'] = nativity_cache.get(int(taxon_id), 'Unknown')
+                results.at[idx, 'nativity_place_id'] = resolved_nativity_place_id
 
         # --- State-level retry for taxa that came back Unknown ---------------
         # If many results are Unknown it often means the initial place is too
-        # specific (e.g. a county park) and the per-taxon ancestor crawl in
-        # _lookup_nativity_via_species_counts silently failed for some entries.
-        # Re-try just those taxa using the state/province place ID, which has
-        # the most complete iNaturalist establishment-means records.
-        unknown_indices = [
-            idx for idx in results.index
+        # specific (e.g. a county park) and the batch ancestor crawl silently
+        # missed some entries.  Re-try just those taxa using the state/province
+        # place ID, which has the most complete establishment-means records.
+        unknown_ids = [
+            int(results.at[idx, 'taxon.id'])
+            for idx in results.index
             if results.at[idx, 'nativity'] == 'Unknown'
             and pd.notna(results.at[idx, 'taxon.id'])
         ]
-        unknown_fraction = len(unknown_indices) / len(results) if len(results) > 0 else 0.0
-        if unknown_indices and unknown_fraction >= unknown_retry_threshold:
+        unknown_fraction = len(unknown_ids) / len(results) if len(results) > 0 else 0.0
+        if unknown_ids and unknown_fraction >= unknown_retry_threshold:
             state_pid = _find_state_place_id(session=session, places=places, loc=loc, api_version=api_version)
             if state_pid is not None and state_pid != resolved_nativity_place_id:
                 logger.info(
                     'Retrying nativity for %d Unknown taxa at state-level place %s '
                     '(%.0f%% unknown exceeded threshold %.0f%%)',
-                    len(unknown_indices), state_pid,
+                    len(unknown_ids), state_pid,
                     unknown_fraction * 100, unknown_retry_threshold * 100,
                 )
-                for idx in unknown_indices:
-                    cache_key = int(results.at[idx, 'taxon.id'])
-                    # Always re-query; don't reuse the prior Unknown cache entry.
-                    label, resolved_pid = _lookup_nativity_via_species_counts(
-                        session=session,
-                        taxon_id=cache_key,
-                        nativity_place_id=state_pid,
-                        api_version=api_version,
-                    )
-                    nativity_cache[cache_key] = (label, resolved_pid)
-                    results.at[idx, 'nativity'] = label
-                    results.at[idx, 'nativity_place_id'] = resolved_pid
+                retry_result = _batch_lookup_nativity(
+                    session=session,
+                    taxon_ids=unknown_ids,
+                    nativity_place_id=state_pid,
+                    api_version=api_version,
+                )
+                nativity_cache.update(retry_result)
+                for idx in results.index:
+                    taxon_id = results.at[idx, 'taxon.id']
+                    if pd.notna(taxon_id):
+                        tid = int(taxon_id)
+                        results.at[idx, 'nativity'] = nativity_cache.get(tid, 'Unknown')
             elif state_pid == resolved_nativity_place_id:
                 logger.debug(
                     'State-level retry skipped: resolved nativity place %s is already state-level.',
@@ -1706,25 +1776,7 @@ def coming_soon(kind: str = 'any',
         if pd.isna(taxon_name) or not str(taxon_name).strip():
             taxon_name = 'Unknown'
         image_url = row['taxon.default_photo.medium_url']
-        nativity = _infer_nativity_from_row(row)
-        taxon_id = row.get('taxon.id')
-        if not nativity:
-            cache_key = int(taxon_id) if pd.notna(taxon_id) else None
-            if cache_key is None:
-                nativity = 'Unknown'
-            elif 'nativity' in results.columns and pd.notna(row.get('nativity')):
-                nativity = row.get('nativity')
-            elif cache_key in nativity_cache:
-                nativity, _ = nativity_cache[cache_key]
-            else:
-                _nat_label, _nat_pid = _lookup_nativity_via_species_counts(
-                    session=session,
-                    taxon_id=cache_key,
-                    nativity_place_id=resolved_nativity_place_id,
-                    api_version=api_version,
-                )
-                nativity_cache[cache_key] = (_nat_label, _nat_pid)
-                nativity = _nat_label
+        nativity = row.get('nativity') if 'nativity' in results.columns and pd.notna(row.get('nativity')) else 'Unknown'
 
         logger.info("%s (%s) - %s", taxon_name, common_name, row.get('taxon.wikipedia_url'))
 
@@ -1753,7 +1805,7 @@ def coming_soon(kind: str = 'any',
     return results.head(capped_limit).copy()
 
 
-def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = None, session: Optional[requests.Session] = None, use_cache: bool = True, per_page: int = 50, max_pages: int = 5, api_version: str = DEFAULT_INAT_API_VERSION) -> pd.DataFrame:
+def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = None, session: Optional[requests.Session] = None, use_cache: bool = True, per_page: int = 50, max_pages: int = 5, lineage_filter: str = 'any', nativity_place_id: Union[int, str, None] = 'auto', unknown_retry_threshold: float = 0.5, api_version: str = DEFAULT_INAT_API_VERSION) -> pd.DataFrame:
     """Return the most common species in a park, sorted by relative frequency.
 
     Parameters
@@ -1764,15 +1816,26 @@ def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = N
         One of the supported kind strings (see :func:`coming_soon`).
     limit:
         Maximum number of rows to return.
+    lineage_filter:
+        Optional nativity filter. Supported values are ``'any'`` (default),
+        ``'native_endemic'``, and ``'introduced'``.
+    nativity_place_id:
+        Place scope for nativity inference. Use ``'auto'`` (default) to derive
+        from *geocenter*, an integer place ID, or ``None`` for global scope.
+    unknown_retry_threshold:
+        Fraction (0–1) of ``'Unknown'`` taxa that triggers a state-level
+        nativity retry. Default ``0.5``.
 
     Returns
     -------
     pandas.DataFrame
-        DataFrame of top taxa with columns ``count``, ``taxon.name``, and
-        ``taxon.preferred_common_name``. An empty DataFrame is returned when
-        no species are found.
+        DataFrame of top taxa with columns ``count``, ``taxon.name``,
+        ``taxon.preferred_common_name``, ``taxon.wikipedia_url``, ``nativity``,
+        and ``nativity_place_id``. An empty DataFrame is returned when no
+        species are found.
     """
     logger.debug('get_park_data called geocenter=%s kind=%s limit=%s', geocenter, kind, limit)
+    assert lineage_filter in ['any', 'native_endemic', 'introduced'], "lineage_filter must be one of 'any', 'native_endemic', or 'introduced'"
 
     taxa = _taxa_for_kind(kind)
     
@@ -1780,8 +1843,22 @@ def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = N
         session = get_inat_session(token=token, use_cache=use_cache)
     client = _inat_client(session, api_version=api_version)
 
+    resolved_nativity_place_id = _resolve_nativity_place_id(
+        session=session,
+        nativity_place_id=nativity_place_id,
+        places=None,
+        loc=geocenter,
+        api_version=api_version,
+    )
+
     per_page = max(1, int(per_page))
     max_pages = max(1, int(max_pages))
+
+    # When using API v2, include the field set with inline establishment_means.
+    _v2_fields: dict[str, Any] = {}
+    if api_version == 'v2':
+        import json as _json
+        _v2_fields = {'fields': _json.dumps(SPECIES_COUNTS_FIELDS_V2)}
 
     if HAS_PYINAT:
         res = pd.json_normalize(inat.get_observation_species_counts(lat=geocenter[0], 
@@ -1793,7 +1870,7 @@ def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = N
     else:
         frames = []
         for page in range(1, max_pages + 1):
-            params = {**taxa, 'lat': geocenter[0], 'lng': geocenter[1], 'radius': geocenter[2], 'verifiable': 'true', 'per_page': per_page, 'page': page}
+            params = {**taxa, **_v2_fields, 'lat': geocenter[0], 'lng': geocenter[1], 'radius': geocenter[2], 'verifiable': 'true', 'per_page': per_page, 'page': page}
             try:
                 payload = client.observation_species_counts(params=params, timeout=30)
                 page_df = pd.json_normalize(payload.get('results', []))
@@ -1807,42 +1884,15 @@ def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = N
                 break
         res = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if res.empty:
-        return pd.DataFrame(columns=['count', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url']).head(limit)
+        return pd.DataFrame(columns=['count', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url', 'nativity', 'nativity_place_id']).head(limit)
     res['count'] = pd.to_numeric(res.get('count', pd.Series(dtype=float)), errors='coerce').fillna(0)
     taxon_ids = res['taxon.id'].dropna().astype(int).tolist()
-
-    def _chunked_get_counts(taxon_ids_list, chunk_size=100):
-        frames = []
-        for i in range(0, len(taxon_ids_list), chunk_size):
-            chunk = taxon_ids_list[i:i + chunk_size]
-            if HAS_PYINAT:
-                r = inat.get_observation_species_counts(taxon_id=chunk, verifiable=True, per_page=per_page)
-                df = pd.json_normalize(r.get('results', []))
-            else:
-                page_frames = []
-                for page in range(1, max_pages + 1):
-                    params = {'taxon_id': chunk, 'verifiable': 'true', 'per_page': per_page, 'page': page}
-                    try:
-                        payload = client.observation_species_counts(params=params, timeout=30)
-                        page_df = pd.json_normalize(payload.get('results', []))
-                        if page_df.empty:
-                            break
-                        page_frames.append(page_df)
-                        if len(page_df) < per_page:
-                            break
-                    except Exception as e:
-                        logger.warning('Failed REST call for chunked park counts: %s', e)
-                        break
-                df = pd.concat(page_frames, ignore_index=True) if page_frames else pd.DataFrame()
-            if not df.empty:
-                frames.append(df)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     if not taxon_ids:
         res['normalizer'] = np.nan
         res['sorter'] = 0
     else:
-        normer_df = _chunked_get_counts(taxon_ids)
+        normer_df = _chunked_species_counts(client, taxon_ids, per_page=per_page, max_pages=max_pages)
         if not normer_df.empty and 'taxon.id' in normer_df.columns:
             normer = normer_df.groupby('taxon.id', as_index=True)['count'].sum()
         else:
@@ -1856,7 +1906,76 @@ def get_park_data(geocenter:tuple, kind:str, limit:int, token: Optional[str] = N
     logger.info('%s:', kind)
     if len(res) > 499:
         logger.warning('Too many results; normalization may be incomplete')
-    return res[['count', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url']].head(limit)
+
+    # --- Nativity classification -------------------------------------------
+    nativity_cache: dict[int, str] = {}
+    if not res.empty and taxon_ids:
+        # Inline establishment_means (v2 with fields) when available.
+        for idx in res.index:
+            taxon_id = res.at[idx, 'taxon.id']
+            if pd.isna(taxon_id):
+                continue
+            inferred = _infer_nativity_from_row(res.loc[idx])
+            if inferred:
+                nativity_cache[int(taxon_id)] = inferred
+
+        unresolved_ids = [t for t in taxon_ids if t not in nativity_cache]
+        if unresolved_ids:
+            batch_result = _batch_lookup_nativity(
+                session=session,
+                taxon_ids=unresolved_ids,
+                nativity_place_id=resolved_nativity_place_id,
+                api_version=api_version,
+            )
+            nativity_cache.update(batch_result)
+
+        for idx in res.index:
+            taxon_id = res.at[idx, 'taxon.id']
+            if pd.isna(taxon_id):
+                res.at[idx, 'nativity'] = 'Unknown'
+                res.at[idx, 'nativity_place_id'] = None
+            else:
+                res.at[idx, 'nativity'] = nativity_cache.get(int(taxon_id), 'Unknown')
+                res.at[idx, 'nativity_place_id'] = resolved_nativity_place_id
+
+        # State-level retry when too many taxa are Unknown.
+        unknown_ids = [
+            int(res.at[idx, 'taxon.id'])
+            for idx in res.index
+            if res.at[idx, 'nativity'] == 'Unknown'
+            and pd.notna(res.at[idx, 'taxon.id'])
+        ]
+        unknown_fraction = len(unknown_ids) / len(res) if len(res) > 0 else 0.0
+        if unknown_ids and unknown_fraction >= unknown_retry_threshold:
+            state_pid = _find_state_place_id(session=session, places=None, loc=geocenter, api_version=api_version)
+            if state_pid is not None and state_pid != resolved_nativity_place_id:
+                logger.info(
+                    'get_park_data: retrying nativity for %d Unknown taxa at state-level place %s',
+                    len(unknown_ids), state_pid,
+                )
+                retry_result = _batch_lookup_nativity(
+                    session=session,
+                    taxon_ids=unknown_ids,
+                    nativity_place_id=state_pid,
+                    api_version=api_version,
+                )
+                nativity_cache.update(retry_result)
+                for idx in res.index:
+                    taxon_id = res.at[idx, 'taxon.id']
+                    if pd.notna(taxon_id):
+                        res.at[idx, 'nativity'] = nativity_cache.get(int(taxon_id), 'Unknown')
+
+        # Apply lineage filter.
+        if lineage_filter == 'introduced':
+            res = res[res['nativity'] == 'Introduced']
+        elif lineage_filter == 'native_endemic':
+            res = res[res['nativity'] != 'Introduced']
+    else:
+        res['nativity'] = 'Unknown'
+        res['nativity_place_id'] = None
+    # -----------------------------------------------------------------------
+
+    return res[['count', 'taxon.name', 'taxon.preferred_common_name', 'taxon.wikipedia_url', 'nativity', 'nativity_place_id']].head(limit)
 
 
 def _compute_location_from_values(mode: str,
