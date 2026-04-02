@@ -308,6 +308,8 @@ def _taxa_for_kind(kind: str) -> dict:
     normalized_kind = (kind or '').lower().strip()
     if normalized_kind == 'fruit':
         normalized_kind = 'fruits'
+    if normalized_kind == 'plants-in-flower':
+        normalized_kind = 'flowers'
 
     if normalized_kind == 'any':
         return {}

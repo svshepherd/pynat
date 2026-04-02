@@ -545,6 +545,13 @@ def test_taxa_for_kind_flowers_includes_taxon_id():
     assert 'term_value_id' in taxa
 
 
+def test_taxa_for_kind_plants_in_flower_alias():
+    import helpers as h
+
+    taxa = h._taxa_for_kind('plants-in-flower')
+    assert taxa == {'taxon_id': 47126, 'term_id': 12, 'term_value_id': 13}
+
+
 def test_resolve_nativity_place_id_auto_from_places():
     import helpers as h
 
