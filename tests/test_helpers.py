@@ -114,7 +114,7 @@ def test_get_mine_rest_fallback(monkeypatch):
 
     session = FakeSession()
     assert h.get_mine('me', STRT=dt.date(2026, 2, 1), FNSH=dt.date(2026, 2, 2), session=session) is None
-    assert any('/v1/observations' in call[0] for call in session.calls)
+    assert any('/v2/observations' in call[0] for call in session.calls)
 
 
 def test_get_park_data_rest_fallback(monkeypatch):
@@ -1200,3 +1200,370 @@ def test_lookup_nativity_ancestor_crawl_exhausted_returns_unknown():
     assert label == 'Unknown'
     assert resolved_pid is None
 
+
+# ---------------------------------------------------------------------------
+# Seasonal taxon registry + helpers tests
+# ---------------------------------------------------------------------------
+
+
+def test_get_seasonal_taxon_by_key():
+    import helpers as h
+
+    entry = h.get_seasonal_taxon_by_key('lepidoptera')
+    assert entry['taxon_id'] == 47157
+    assert entry['group'] == 'insects'
+    assert entry['analysis_mode'] == 'phenology'
+    assert len(entry['life_stages']) == 3
+
+
+def test_get_seasonal_taxon_by_key_unknown():
+    import helpers as h
+
+    with pytest.raises(ValueError, match='Unknown seasonal taxon key'):
+        h.get_seasonal_taxon_by_key('nonexistent')
+
+
+def test_get_seasonal_group_overview_entries():
+    import helpers as h
+
+    entries = h.get_seasonal_group_overview_entries()
+    keys = [e['key'] for e in entries]
+    assert 'insects' in keys
+    assert 'birds' in keys
+    assert 'mammalia' in keys
+    assert 'plants_in_flower' in keys
+    assert len(entries) == 4
+    for e in entries:
+        assert e['group'] is None
+
+
+def test_get_seasonal_subgroup_entries_insects():
+    import helpers as h
+
+    entries = h.get_seasonal_subgroup_entries('insects')
+    keys = [e['key'] for e in entries]
+    assert len(entries) == 9
+    assert 'coleoptera' in keys
+    assert 'other_insects' in keys
+
+    # Verify other_insects uses without_taxon_id
+    other = h.get_seasonal_taxon_by_key('other_insects')
+    assert other['taxon_id'] == 47158
+    assert other['without_taxon_id'] == h._NAMED_INSECT_ORDER_IDS
+
+
+def test_get_seasonal_subgroup_entries_birds():
+    import helpers as h
+
+    entries = h.get_seasonal_subgroup_entries('birds')
+    keys = [e['key'] for e in entries]
+    assert len(entries) == 2
+    assert 'passerines' in keys
+    assert 'non_passerines' in keys
+
+    non_pass = h.get_seasonal_taxon_by_key('non_passerines')
+    assert non_pass['taxon_id'] == 3
+    assert non_pass['without_taxon_id'] == [7251]
+
+
+def test_get_seasonal_subgroup_entries_standalone():
+    import helpers as h
+
+    entries = h.get_seasonal_subgroup_entries('mammalia')
+    assert len(entries) == 1
+    assert entries[0]['key'] == 'mammalia'
+
+
+def test_normalize_within_taxon():
+    import helpers as h
+
+    hist_df = pd.DataFrame([
+        {'focus_group': 'A', 'life_stage_bucket': 'overall', 'interval': 'month_of_year', 'bin': 1, 'count': 30},
+        {'focus_group': 'A', 'life_stage_bucket': 'overall', 'interval': 'month_of_year', 'bin': 2, 'count': 70},
+        {'focus_group': 'B', 'life_stage_bucket': 'overall', 'interval': 'month_of_year', 'bin': 1, 'count': 10},
+        {'focus_group': 'B', 'life_stage_bucket': 'overall', 'interval': 'month_of_year', 'bin': 2, 'count': 40},
+    ])
+
+    result = h.normalize_within_taxon(hist_df)
+    assert 'fraction' in result.columns
+
+    a_fractions = result[result['focus_group'] == 'A']['fraction'].tolist()
+    assert abs(sum(a_fractions) - 1.0) < 1e-9
+    assert abs(a_fractions[0] - 0.3) < 1e-9
+    assert abs(a_fractions[1] - 0.7) < 1e-9
+
+    b_fractions = result[result['focus_group'] == 'B']['fraction'].tolist()
+    assert abs(sum(b_fractions) - 1.0) < 1e-9
+
+
+def test_normalize_within_taxon_empty():
+    import helpers as h
+
+    result = h.normalize_within_taxon(pd.DataFrame())
+    assert result.empty
+    assert 'fraction' in result.columns
+
+
+def test_fetch_seasonal_histograms_mocked():
+    import helpers as h
+
+    class FakeResp:
+        status_code = 200
+        headers = {}
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {'results': {'month_of_year': {'1': 100, '6': 200}}}
+
+    class FakeSession:
+        def __init__(self):
+            self.call_count = 0
+
+        def get(self, url, params=None, timeout=30):
+            self.call_count += 1
+            return FakeResp()
+
+    session = FakeSession()
+    entries = [h.get_seasonal_taxon_by_key('mammalia')]
+
+    result = h.fetch_seasonal_histograms(
+        entries, [1297], session=session,
+        intervals=('month_of_year',),
+        api_version='v2',
+    )
+
+    assert not result.empty
+    assert set(result.columns) == {'focus_group', 'life_stage_bucket', 'interval', 'bin', 'count'}
+    assert result[result['bin'] == 6]['count'].iloc[0] == 200
+    # 1 entry x 1 interval = 1 API call
+    assert session.call_count == 1
+
+
+def test_fetch_seasonal_histograms_with_life_stages():
+    import helpers as h
+
+    call_log = []
+
+    class FakeResp:
+        status_code = 200
+        headers = {}
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {'results': {'week_of_year': {'10': 50}}}
+
+    class FakeSession:
+        def get(self, url, params=None, timeout=30):
+            call_log.append(params)
+            return FakeResp()
+
+    session = FakeSession()
+    entries = [h.get_seasonal_taxon_by_key('lepidoptera')]
+
+    result = h.fetch_seasonal_histograms(
+        entries, [1297], session=session,
+        intervals=('week_of_year',),
+        api_version='v2',
+    )
+
+    # 1 overall + 3 life stages = 4 specs, x 1 interval = 4 calls
+    assert len(call_log) == 4
+    buckets = set(result['life_stage_bucket'])
+    assert buckets == {'overall', 'adult', 'larva', 'pupa'}
+
+
+def test_fetch_top_seasonal_taxa_mocked():
+    import helpers as h
+
+    call_index = {'n': 0}
+
+    class FakeResp:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def get(self, url, params=None, timeout=30):
+            call_index['n'] += 1
+            n = call_index['n']
+            if 'species_counts' in url:
+                return FakeResp({'results': [
+                    {'taxon': {'id': 100, 'name': 'Species A', 'preferred_common_name': 'Sp A'}, 'count': 500},
+                    {'taxon': {'id': 200, 'name': 'Species B', 'preferred_common_name': 'Sp B'}, 'count': 300},
+                ]})
+            if params and params.get('interval') == 'year':
+                return FakeResp({'results': {'year': {'2020-01-01': 100, '2021-01-01': 80, '2022-01-01': 60}}})
+            if params and params.get('interval') == 'month_of_year':
+                return FakeResp({'results': {'month_of_year': {'3': 40, '6': 60}}})
+            return FakeResp({'results': {}})
+
+    session = FakeSession()
+    entry = h.get_seasonal_taxon_by_key('mammalia')
+
+    top_df, monthly_df = h.fetch_top_seasonal_taxa(
+        entry, [1297], session=session,
+        top_n=5, min_obs_per_year=25,
+        api_version='v2',
+    )
+
+    assert len(top_df) == 2
+    assert not monthly_df.empty
+    assert 'fraction' in monthly_df.columns
+    # Fractions per species should sum to 1.0
+    for tid, grp in monthly_df.groupby('taxon_id'):
+        assert abs(grp['fraction'].sum() - 1.0) < 1e-9
+
+
+def test_fetch_top_seasonal_taxa_uses_rank_filter():
+    import helpers as h
+
+    species_calls = []
+
+    class FakeResp:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def get(self, url, params=None, timeout=30):
+            if 'species_counts' in url:
+                species_calls.append(dict(params or {}))
+                return FakeResp({'results': [
+                    {'taxon': {'id': 100, 'name': 'Species A', 'preferred_common_name': 'Sp A', 'rank': 'species'}, 'count': 500},
+                ]})
+            if params and params.get('interval') == 'year':
+                return FakeResp({'results': {'year': {'2020-01-01': 100}}})
+            if params and params.get('interval') == 'month_of_year':
+                return FakeResp({'results': {'month_of_year': {'3': 40, '6': 60}}})
+            return FakeResp({'results': {}})
+
+    entry = {**h.get_seasonal_taxon_by_key('mammalia'), 'tier3_rank': 'genus'}
+    session = FakeSession()
+
+    h.fetch_top_seasonal_taxa(
+        entry, [1297], session=session,
+        top_n=5, min_obs_per_year=25,
+        api_version='v2',
+    )
+
+    assert species_calls, 'expected species_counts call'
+    assert species_calls[0].get('rank') == 'genus'
+
+
+def test_fetch_top_seasonal_taxa_builds_display_label_fallbacks():
+    import helpers as h
+
+    class FakeResp:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def get(self, url, params=None, timeout=30):
+            if 'species_counts' in url:
+                return FakeResp({'results': [
+                    {'taxon': {'id': 100, 'name': 'Named Only', 'preferred_common_name': None, 'rank': 'species'}, 'count': 250},
+                    {'taxon': {'id': 200, 'name': None, 'preferred_common_name': None, 'rank': 'species'}, 'count': 240},
+                    {'taxon': None, 'count': 999},
+                ]})
+            if params and params.get('interval') == 'year':
+                return FakeResp({'results': {'year': {'2020-01-01': 100}}})
+            if params and params.get('interval') == 'month_of_year':
+                return FakeResp({'results': {'month_of_year': {'1': 100}}})
+            return FakeResp({'results': {}})
+
+    session = FakeSession()
+    entry = h.get_seasonal_taxon_by_key('mammalia')
+
+    top_df, monthly_df = h.fetch_top_seasonal_taxa(
+        entry, [1297], session=session,
+        top_n=10, min_obs_per_year=1,
+        api_version='v2',
+    )
+
+    # Unresolved row with missing taxon_id should be dropped before monthly queries.
+    assert set(top_df['taxon_id']) == {100, 200}
+    assert set(monthly_df['taxon_id']) == {100, 200}
+
+    labels = dict(zip(top_df['taxon_id'], top_df['display_label']))
+    assert labels[100] == 'Named Only'
+    assert labels[200] == 'Taxon 200'
+
+
+def test_fetch_top_seasonal_taxa_backfills_missing_taxon_metadata():
+    import helpers as h
+
+    class FakeResp:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def get(self, url, params=None, timeout=30):
+            if 'species_counts' in url:
+                return FakeResp({'results': [
+                    {'taxon': {'id': 321, 'name': None, 'preferred_common_name': None, 'rank': None}, 'count': 200},
+                ]})
+            if '/taxa/321' in url:
+                return FakeResp({'results': [
+                    {'id': 321, 'name': 'Carabidae sp.', 'rank': 'species', 'preferred_common_name': 'Ground beetle'},
+                ]})
+            if params and params.get('interval') == 'year':
+                return FakeResp({'results': {'year': {'2024-01-01': 200}}})
+            if params and params.get('interval') == 'month_of_year':
+                return FakeResp({'results': {'month_of_year': {'4': 80, '5': 120}}})
+            return FakeResp({'results': {}})
+
+    entry = h.get_seasonal_taxon_by_key('coleoptera')
+    session = FakeSession()
+
+    top_df, monthly_df = h.fetch_top_seasonal_taxa(
+        entry, [1297], session=session,
+        top_n=5, min_obs_per_year=25,
+        refresh_cache=True,
+        api_version='v2',
+    )
+
+    assert len(top_df) == 1
+    row = top_df.iloc[0]
+    assert row['common_name'] == 'Ground beetle'
+    assert row['taxon_name'] == 'Carabidae sp.'
+    assert row['taxon_rank'] == 'species'
+    assert row['display_label'] == 'Ground beetle'
+    assert not monthly_df.empty
