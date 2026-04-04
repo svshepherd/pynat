@@ -35,6 +35,7 @@ class INatAPIClient:
         max_retries: int = 3,
         backoff_base_seconds: float = 1.5,
         retry_statuses: Optional[set[int]] = None,
+        min_request_interval: float = 1.0,
     ) -> None:
         self.session = session or requests.Session()
         self.api_version = str(api_version).strip("/") or "v1"
@@ -42,6 +43,8 @@ class INatAPIClient:
         self.max_retries = max(0, int(max_retries))
         self.backoff_base_seconds = float(backoff_base_seconds)
         self.retry_statuses = retry_statuses or {403, 429, 500, 502, 503, 504}
+        self.min_request_interval = max(0.0, float(min_request_interval))
+        self._last_request_time: float = 0.0
 
     def endpoint(self, path: str) -> str:
         return f"{self.base_url}/{path.lstrip('/')}"
@@ -52,7 +55,13 @@ class INatAPIClient:
         last_exc: Optional[Exception] = None
 
         for attempt in range(self.max_retries + 1):
+            # Enforce minimum interval between requests to respect rate limits.
+            if self.min_request_interval > 0:
+                elapsed = time.monotonic() - self._last_request_time
+                if elapsed < self.min_request_interval:
+                    time.sleep(self.min_request_interval - elapsed)
             try:
+                self._last_request_time = time.monotonic()
                 response = self.session.get(url, params=params, timeout=timeout)
             except requests.RequestException as exc:
                 last_exc = exc
@@ -106,3 +115,7 @@ class INatAPIClient:
     def places_autocomplete(self, params: Optional[dict[str, Any]] = None, timeout: int = 30) -> dict[str, Any]:
         """Search places by name via ``/places/autocomplete``."""
         return self.get_json("places/autocomplete", params=params, timeout=timeout)
+
+    def observation_histogram(self, params: Optional[dict[str, Any]] = None, timeout: int = 30) -> dict[str, Any]:
+        """Query ``/observations/histogram`` for aggregate observation counts."""
+        return self.get_json("observations/histogram", params=params, timeout=timeout)

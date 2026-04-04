@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 VERTEBRATES_TAXON_ID = 355675
 PHENOTYPE_IMAGE_KINDS = {'flowers', 'fruits', 'butterflies', 'caterpillars'}
 DEFAULT_NATIVITY_PLACE_ID = 1297  # Virginia
-DEFAULT_INAT_API_VERSION = (os.environ.get('INAT_API_VERSION', 'v1') or 'v1').strip('/')
+DEFAULT_INAT_API_VERSION = (os.environ.get('INAT_API_VERSION', 'v2') or 'v2').strip('/')
 OBSERVATION_ROW_COLUMNS = [
     'obs_id',
     'observed_on',
@@ -93,6 +93,48 @@ OBSERVATION_ROW_COLUMNS = [
     'first_identification_delay_days',
     'first_non_owner_identification_delay_days',
     'photo_url',
+]
+
+# 27 Piedmont counties + 9 independent cities (iNaturalist place IDs)
+PIEDMONT_PLACE_IDS = [
+    # Counties
+    2913,   # Albemarle
+    1660,   # Amelia
+    1372,   # Appomattox
+    1719,   # Arlington
+    733,    # Brunswick
+    2589,   # Buckingham
+    617,    # Campbell
+    1662,   # Charlotte
+    2917,   # Culpeper
+    2590,   # Cumberland
+    738,    # Fairfax
+    1494,   # Fauquier
+    1721,   # Fluvanna
+    2920,   # Goochland
+    1075,   # Halifax
+    1186,   # Henry
+    3032,   # Louisa
+    739,    # Loudoun
+    1724,   # Lunenburg
+    1493,   # Mecklenburg
+    742,    # Nottoway
+    743,    # Orange
+    1664,   # Pittsylvania
+    1491,   # Powhatan
+    2923,   # Prince Edward
+    744,    # Prince William
+    2925,   # Spotsylvania
+    # Independent cities
+    13446,  # Alexandria
+    13435,  # Charlottesville
+    13434,  # Danville
+    108238, # Fairfax (city)
+    13451,  # Falls Church
+    13483,  # Lynchburg
+    13410,  # Manassas
+    13430,  # Manassas Park
+    13445,  # Martinsville
 ]
 
 # Minimal field set for the iNaturalist /observations endpoint.  Requesting
@@ -142,6 +184,7 @@ SPECIES_COUNTS_FIELDS_V2 = {
     'taxon': {
         'id': True,
         'name': True,
+        'rank': True,
         'preferred_common_name': True,
         'wikipedia_url': True,
         'default_photo': {'medium_url': True},
@@ -289,6 +332,620 @@ def _get_ancestor_place_ids(
         return []
 
 
+# ---------------------------------------------------------------------------
+# Seasonal taxon registry (hierarchical groups for seasonal-pattern analysis)
+# ---------------------------------------------------------------------------
+
+# Named insect order IDs used for the "Other Insects" exclusion list.
+_NAMED_INSECT_ORDER_IDS = [47208, 47822, 47201, 47157, 47744, 47651, 47792, 81769]
+
+SEASONAL_TAXON_REGISTRY: list[dict[str, Any]] = [
+    # -- Insects (group) --
+    {
+        'key': 'insects',
+        'group': None,
+        'focus_group': 'Insecta',
+        'title_label': 'Insects',
+        'taxon_id': 47158,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#1f77b4',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [
+            'coleoptera', 'diptera', 'hymenoptera', 'lepidoptera',
+            'hemiptera', 'orthoptera', 'odonata', 'blattodea', 'other_insects',
+        ],
+    },
+    {
+        'key': 'coleoptera',
+        'group': 'insects',
+        'focus_group': 'Coleoptera',
+        'title_label': 'Beetles',
+        'taxon_id': 47208,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#8c564b',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [],
+    },
+    {
+        'key': 'diptera',
+        'group': 'insects',
+        'focus_group': 'Diptera',
+        'title_label': 'Flies',
+        'taxon_id': 47822,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#e377c2',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [],
+    },
+    {
+        'key': 'hymenoptera',
+        'group': 'insects',
+        'focus_group': 'Hymenoptera',
+        'title_label': 'Ants, Bees, and Wasps',
+        'taxon_id': 47201,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#ff7f0e',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [],
+    },
+    {
+        'key': 'lepidoptera',
+        'group': 'insects',
+        'focus_group': 'Lepidoptera',
+        'title_label': 'Butterflies and Moths',
+        'taxon_id': 47157,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#1f77b4',
+        'analysis_mode': 'phenology',
+        'life_stages': [
+            {'bucket': 'adult', 'term_id': 1, 'term_value_id': 2},
+            {'bucket': 'larva', 'term_id': 1, 'term_value_id': 6},
+            {'bucket': 'pupa', 'term_id': 1, 'term_value_id': 4},
+        ],
+        'children': [],
+    },
+    {
+        'key': 'hemiptera',
+        'group': 'insects',
+        'focus_group': 'Hemiptera',
+        'title_label': 'True Bugs',
+        'taxon_id': 47744,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#bcbd22',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [],
+    },
+    {
+        'key': 'orthoptera',
+        'group': 'insects',
+        'focus_group': 'Orthoptera',
+        'title_label': 'Grasshoppers and Crickets',
+        'taxon_id': 47651,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#17becf',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [],
+    },
+    {
+        'key': 'odonata',
+        'group': 'insects',
+        'focus_group': 'Odonata',
+        'title_label': 'Dragonflies and Damselflies',
+        'taxon_id': 47792,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#7f7f7f',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [],
+    },
+    {
+        'key': 'blattodea',
+        'group': 'insects',
+        'focus_group': 'Blattodea',
+        'title_label': 'Cockroaches and Termites',
+        'taxon_id': 81769,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#d62728',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [],
+    },
+    {
+        'key': 'other_insects',
+        'group': 'insects',
+        'focus_group': 'Other Insects',
+        'title_label': 'Other Insects',
+        'taxon_id': 47158,
+        'extra': {},
+        'without_taxon_id': _NAMED_INSECT_ORDER_IDS,
+        'color': '#aec7e8',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [],
+    },
+    # -- Birds (group) --
+    {
+        'key': 'birds',
+        'group': None,
+        'focus_group': 'Aves',
+        'title_label': 'Birds',
+        'taxon_id': 3,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#d62728',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': ['passerines', 'non_passerines'],
+    },
+    {
+        'key': 'passerines',
+        'group': 'birds',
+        'focus_group': 'Passeriformes',
+        'title_label': 'Passerines (Songbirds)',
+        'taxon_id': 7251,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#d62728',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [],
+    },
+    {
+        'key': 'non_passerines',
+        'group': 'birds',
+        'focus_group': 'Non-passerines',
+        'title_label': 'Non-passerines',
+        'taxon_id': 3,
+        'extra': {},
+        'without_taxon_id': [7251],
+        'color': '#ff9896',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [],
+    },
+    # -- Mammalia (standalone) --
+    {
+        'key': 'mammalia',
+        'group': None,
+        'focus_group': 'Mammalia',
+        'title_label': 'Mammals',
+        'taxon_id': 40151,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#2ca02c',
+        'analysis_mode': 'seasonality',
+        'life_stages': [],
+        'children': [],
+    },
+    # -- Plants in Flower (standalone) --
+    {
+        'key': 'plants_in_flower',
+        'group': None,
+        'focus_group': 'Plants in Flower',
+        'title_label': 'Flowering Plants',
+        'taxon_id': 47126,
+        'extra': {'term_id': 12, 'term_value_id': 13},
+        'without_taxon_id': None,
+        'color': '#9467bd',
+        'analysis_mode': 'phenology',
+        'life_stages': [],
+        'children': [],
+    },
+]
+
+_seasonal_taxon_lookup: dict[str, dict] = {t['key']: t for t in SEASONAL_TAXON_REGISTRY}
+
+
+def get_seasonal_taxon_by_key(key: str) -> dict:
+    """Look up a single seasonal taxon entry by its registry key."""
+    if key not in _seasonal_taxon_lookup:
+        raise ValueError(f'Unknown seasonal taxon key: {key}')
+    return _seasonal_taxon_lookup[key]
+
+
+def get_seasonal_group_overview_entries() -> list[dict]:
+    """Return the top-level group entries for Tier-1 overview fetching.
+
+    Returns one entry per top-level group (Insects, Birds, Mammalia,
+    Plants in Flower) using the parent taxon_id for each.
+    """
+    return [t for t in SEASONAL_TAXON_REGISTRY if t['group'] is None]
+
+
+def get_seasonal_subgroup_entries(group_key: str) -> list[dict]:
+    """Return the child entries for a given group key (Tier-2 drill-down).
+
+    For standalone taxa (no children), returns a list containing only the
+    group entry itself.
+    """
+    parent = get_seasonal_taxon_by_key(group_key)
+    children_keys = parent.get('children', [])
+    if not children_keys:
+        return [parent]
+    return [get_seasonal_taxon_by_key(k) for k in children_keys]
+
+
+def _build_histogram_params(
+    entry: dict,
+    place_id_str: str,
+    interval: str,
+    native: bool = True,
+) -> dict[str, Any]:
+    """Build query params for an observation_histogram call from a registry entry."""
+    params: dict[str, Any] = {
+        'place_id': place_id_str,
+        'verifiable': 'true',
+        'taxon_id': entry['taxon_id'],
+        'interval': interval,
+        **entry.get('extra', {}),
+    }
+    if native:
+        params['native'] = 'true'
+    wt = entry.get('without_taxon_id')
+    if wt:
+        params['without_taxon_id'] = ','.join(str(x) for x in wt) if isinstance(wt, list) else str(wt)
+    return params
+
+
+def fetch_seasonal_histograms(
+    entries: list[dict],
+    place_ids: list[int],
+    session: Optional[requests.Session] = None,
+    intervals: tuple[str, ...] = ('week_of_year', 'month_of_year'),
+    native: bool = True,
+    cache_path: Optional['Path'] = None,
+    cache_tag: str = 'v5_seasonal',
+    cache_max_age_days: int = 7,
+    refresh_cache: bool = False,
+    api_version: str = DEFAULT_INAT_API_VERSION,
+) -> pd.DataFrame:
+    """Fetch observation histograms for a list of seasonal taxon entries.
+
+    Returns a DataFrame with columns:
+        [focus_group, life_stage_bucket, interval, bin, count]
+
+    Uses parquet caching keyed by the sorted entry keys and cache_tag.
+    """
+    from pathlib import Path as _Path
+
+    place_id_str = ','.join(str(x) for x in place_ids)
+    entry_keys = sorted(e['key'] for e in entries)
+    selection_sig = '__'.join(entry_keys)
+
+    # Check cache
+    if cache_path is not None:
+        cache_file = _Path(cache_path) / f'hist_{selection_sig}_{cache_tag}.parquet'
+        if not refresh_cache and cache_file.exists():
+            age_days = (pd.Timestamp.now().timestamp() - cache_file.stat().st_mtime) / 86400
+            if age_days < cache_max_age_days:
+                return pd.read_parquet(cache_file)
+
+    client = _inat_client(session, api_version=api_version)
+    rows: list[dict] = []
+
+    # Build query specs: overall + any life-stage slices
+    query_specs: list[dict] = []
+    for entry in entries:
+        query_specs.append({
+            'focus_group': entry['focus_group'],
+            'life_stage_bucket': 'overall',
+            'entry': entry,
+        })
+        for stage in entry.get('life_stages', []):
+            stage_entry = {**entry, 'extra': {**entry.get('extra', {}), 'term_id': stage['term_id'], 'term_value_id': stage['term_value_id']}}
+            query_specs.append({
+                'focus_group': entry['focus_group'],
+                'life_stage_bucket': stage['bucket'],
+                'entry': stage_entry,
+            })
+
+    for spec in query_specs:
+        for interval in intervals:
+            params = _build_histogram_params(spec['entry'], place_id_str, interval, native=native)
+            payload = client.observation_histogram(params=params, timeout=30)
+            for key, count in payload.get('results', {}).get(interval, {}).items():
+                rows.append({
+                    'focus_group': spec['focus_group'],
+                    'life_stage_bucket': spec['life_stage_bucket'],
+                    'interval': interval,
+                    'bin': int(key),
+                    'count': int(count),
+                })
+
+    hist_df = pd.DataFrame(rows, columns=['focus_group', 'life_stage_bucket', 'interval', 'bin', 'count'])
+
+    # Write cache
+    if cache_path is not None:
+        _Path(cache_path).mkdir(parents=True, exist_ok=True)
+        hist_df.to_parquet(cache_file, index=False)
+
+    return hist_df
+
+
+def normalize_within_taxon(hist_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize histogram counts within each taxon group.
+
+    For each (focus_group, life_stage_bucket, interval) combination, compute
+    fraction = count / sum(count).  Each taxon's bins sum to 1.0 (100%).
+
+    Returns a copy of the input with an added ``fraction`` column.
+    """
+    if hist_df.empty:
+        result = hist_df.copy()
+        result['fraction'] = pd.Series(dtype=float)
+        return result
+
+    result = hist_df.copy()
+    group_cols = ['focus_group', 'life_stage_bucket', 'interval']
+    totals = result.groupby(group_cols)['count'].transform('sum')
+    result['fraction'] = result['count'] / totals.replace(0, float('nan'))
+    return result
+
+
+def fetch_top_seasonal_taxa(
+    entry: dict,
+    place_ids: list[int],
+    session: Optional[requests.Session] = None,
+    top_n: int = 25,
+    min_obs_per_year: int = 25,
+    tier3_rank: Optional[Union[str, Iterable[str]]] = None,
+    native: bool = True,
+    cache_path: Optional['Path'] = None,
+    cache_tag: str = 'v5_seasonal',
+    cache_max_age_days: int = 7,
+    refresh_cache: bool = False,
+    api_version: str = DEFAULT_INAT_API_VERSION,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Fetch top taxa for a single seasonal taxon entry (Tier 3).
+
+    Steps:
+    1. species_counts call (native=true, per_page=top_n)
+    2. year histogram -> active-year threshold -> filter retained taxa
+    3. Per retained taxon: month_of_year histogram
+    4. Apply normalize_within_taxon()
+
+    Rank behavior:
+    - If ``tier3_rank`` is provided, it is used directly.
+    - Otherwise, if ``entry['tier3_rank']`` exists, it is used.
+    - If neither is provided, defaults to ``'species'``.
+
+    Returns (top_taxa_df, monthly_taxa_df).
+    """
+    from pathlib import Path as _Path
+
+    place_id_str = ','.join(str(x) for x in place_ids)
+    rank_value = tier3_rank if tier3_rank is not None else entry.get('tier3_rank', 'species')
+    if isinstance(rank_value, str):
+        rank_token = rank_value or 'any'
+    elif rank_value:
+        rank_token = '-'.join(str(x) for x in rank_value if x) or 'any'
+    else:
+        rank_token = 'any'
+    cache_sig = f"{entry['key']}_top{top_n}_rank{rank_token}_schema4"
+
+    # Check cache
+    if cache_path is not None:
+        top_cache = _Path(cache_path) / f'top_{cache_sig}_{cache_tag}.parquet'
+        monthly_cache = _Path(cache_path) / f'monthly_{cache_sig}_{cache_tag}.parquet'
+        if not refresh_cache and top_cache.exists() and monthly_cache.exists():
+            top_age = (pd.Timestamp.now().timestamp() - top_cache.stat().st_mtime) / 86400
+            monthly_age = (pd.Timestamp.now().timestamp() - monthly_cache.stat().st_mtime) / 86400
+            if top_age < cache_max_age_days and monthly_age < cache_max_age_days:
+                return pd.read_parquet(top_cache), pd.read_parquet(monthly_cache)
+
+    client = _inat_client(session, api_version=api_version)
+
+    # 1. species_counts
+    spp_params: dict[str, Any] = {
+        'place_id': place_id_str,
+        'verifiable': 'true',
+        'taxon_id': entry['taxon_id'],
+        'per_page': top_n,
+        **entry.get('extra', {}),
+    }
+    if getattr(client, 'api_version', 'v1') == 'v2' and 'fields' not in spp_params:
+        spp_params['fields'] = json.dumps(SPECIES_COUNTS_FIELDS_V2)
+
+    if rank_value:
+        if isinstance(rank_value, str):
+            spp_params['rank'] = rank_value
+        else:
+            spp_params['rank'] = ','.join(str(x) for x in rank_value if x)
+
+    if native:
+        spp_params['native'] = 'true'
+    wt = entry.get('without_taxon_id')
+    if wt:
+        spp_params['without_taxon_id'] = ','.join(str(x) for x in wt) if isinstance(wt, list) else str(wt)
+
+    spp_payload = client.observation_species_counts(params=spp_params, timeout=30)
+    top_rows: list[dict] = []
+    for rec in spp_payload.get('results', []):
+        taxon_info = rec.get('taxon', {}) if isinstance(rec.get('taxon', {}), dict) else {}
+        taxon_id = taxon_info.get('id') or rec.get('taxon_id')
+        taxon_name = taxon_info.get('name') or rec.get('name')
+        common_name = taxon_info.get('preferred_common_name') or rec.get('preferred_common_name')
+        taxon_rank = taxon_info.get('rank') or rec.get('rank')
+        display_label = common_name or taxon_name
+
+        if not display_label and taxon_id is not None:
+            display_label = f'Taxon {taxon_id}'
+        if not taxon_name and display_label:
+            taxon_name = display_label
+
+        top_rows.append({
+            'focus_group': entry['focus_group'],
+            'title_label': entry['title_label'],
+            'taxon_id': taxon_id,
+            'taxon_name': taxon_name,
+            'common_name': common_name,
+            'taxon_rank': taxon_rank,
+            'display_label': display_label,
+            'total_obs': rec.get('count'),
+            'parent_taxon_key': entry['key'],
+        })
+
+    top_taxa_df = pd.DataFrame(top_rows)
+    if top_taxa_df.empty:
+        empty_monthly = pd.DataFrame(columns=['focus_group', 'title_label', 'taxon_id', 'taxon_name', 'common_name', 'taxon_rank', 'display_label', 'month', 'count', 'fraction'])
+        if cache_path is not None:
+            _Path(cache_path).mkdir(parents=True, exist_ok=True)
+            top_taxa_df.to_parquet(top_cache, index=False)
+            empty_monthly.to_parquet(monthly_cache, index=False)
+        return top_taxa_df, empty_monthly
+
+    # Drop unresolved rows that cannot be queried for monthly histograms.
+    top_taxa_df['taxon_id'] = pd.to_numeric(top_taxa_df['taxon_id'], errors='coerce')
+    top_taxa_df = top_taxa_df[top_taxa_df['taxon_id'].notna()].copy()
+    top_taxa_df['taxon_id'] = top_taxa_df['taxon_id'].astype(int)
+
+    if top_taxa_df.empty:
+        empty_monthly = pd.DataFrame(columns=['focus_group', 'title_label', 'taxon_id', 'taxon_name', 'common_name', 'taxon_rank', 'display_label', 'month', 'count', 'fraction'])
+        if cache_path is not None:
+            _Path(cache_path).mkdir(parents=True, exist_ok=True)
+            top_taxa_df.to_parquet(top_cache, index=False)
+            empty_monthly.to_parquet(monthly_cache, index=False)
+        return top_taxa_df, empty_monthly
+
+    # 2. year histogram for active-year thresholding
+    year_params: dict[str, Any] = {
+        'place_id': place_id_str,
+        'verifiable': 'true',
+        'taxon_id': entry['taxon_id'],
+        'interval': 'year',
+        **entry.get('extra', {}),
+    }
+    if native:
+        year_params['native'] = 'true'
+    if wt:
+        year_params['without_taxon_id'] = spp_params['without_taxon_id']
+
+    year_payload = client.observation_histogram(params=year_params, timeout=30)
+    yearly_counts = {
+        pd.to_datetime(k).year: int(v)
+        for k, v in year_payload.get('results', {}).get('year', {}).items()
+    }
+    active_years = max(1, sum(c >= min_obs_per_year for c in yearly_counts.values()))
+    min_total_obs = min_obs_per_year * active_years
+
+    top_taxa_df['total_obs'] = pd.to_numeric(top_taxa_df['total_obs'], errors='coerce').fillna(0).astype(int)
+    top_taxa_df = top_taxa_df[top_taxa_df['total_obs'] >= min_total_obs].copy()
+
+    if top_taxa_df.empty:
+        empty_monthly = pd.DataFrame(columns=['focus_group', 'title_label', 'taxon_id', 'taxon_name', 'common_name', 'taxon_rank', 'display_label', 'month', 'count', 'fraction'])
+        if cache_path is not None:
+            _Path(cache_path).mkdir(parents=True, exist_ok=True)
+            top_taxa_df.to_parquet(top_cache, index=False)
+            empty_monthly.to_parquet(monthly_cache, index=False)
+        return top_taxa_df, empty_monthly
+
+    # Backfill missing taxon metadata by taxon id when species_counts omits fields.
+    # This keeps Tier 3 labels and rank columns usable even with sparse payloads.
+    missing_meta = top_taxa_df[
+        top_taxa_df['taxon_name'].isna()
+        | top_taxa_df['taxon_rank'].isna()
+        | top_taxa_df['common_name'].isna()
+    ]
+    if not missing_meta.empty:
+        taxon_details: dict[int, dict[str, Any]] = {}
+        for tid in sorted(set(int(x) for x in missing_meta['taxon_id'].dropna().tolist())):
+            try:
+                detail_params: dict[str, Any] = {}
+                if getattr(client, 'api_version', 'v1') == 'v2':
+                    detail_params['fields'] = json.dumps({
+                        'id': True,
+                        'name': True,
+                        'rank': True,
+                        'preferred_common_name': True,
+                    })
+                detail_payload = client.get_json(f'taxa/{tid}', params=detail_params or None, timeout=20)
+                results = detail_payload.get('results') if isinstance(detail_payload, dict) else None
+                detail = results[0] if isinstance(results, list) and results else {}
+                if isinstance(detail, dict):
+                    taxon_details[tid] = {
+                        'taxon_name': detail.get('name'),
+                        'taxon_rank': detail.get('rank'),
+                        'common_name': detail.get('preferred_common_name'),
+                    }
+            except Exception as e:
+                logger.debug('Failed taxa/%s metadata lookup: %s', tid, e)
+
+        if taxon_details:
+            for tid, meta in taxon_details.items():
+                row_mask = top_taxa_df['taxon_id'] == tid
+                fallback_name_mask = top_taxa_df['taxon_name'].astype(str).str.fullmatch(r'Taxon\s+\d+', na=False)
+                if meta.get('taxon_name'):
+                    top_taxa_df.loc[row_mask & (top_taxa_df['taxon_name'].isna() | fallback_name_mask), 'taxon_name'] = meta['taxon_name']
+                if meta.get('taxon_rank'):
+                    top_taxa_df.loc[row_mask & top_taxa_df['taxon_rank'].isna(), 'taxon_rank'] = meta['taxon_rank']
+                if meta.get('common_name'):
+                    top_taxa_df.loc[row_mask & top_taxa_df['common_name'].isna(), 'common_name'] = meta['common_name']
+
+            # Rebuild display_label after metadata backfill.
+            top_taxa_df['display_label'] = top_taxa_df['common_name'].fillna(top_taxa_df['taxon_name'])
+            top_taxa_df['display_label'] = top_taxa_df['display_label'].fillna(
+                top_taxa_df['taxon_id'].apply(lambda x: f'Taxon {int(x)}')
+            )
+
+    # 3. Per-species monthly histograms
+    monthly_rows: list[dict] = []
+    for _, row in top_taxa_df.iterrows():
+        monthly_params: dict[str, Any] = {
+            'place_id': place_id_str,
+            'verifiable': 'true',
+            'taxon_id': int(row['taxon_id']),
+            'interval': 'month_of_year',
+            **entry.get('extra', {}),
+        }
+        monthly_payload = client.observation_histogram(params=monthly_params, timeout=30)
+        for mk, mc in monthly_payload.get('results', {}).get('month_of_year', {}).items():
+            monthly_rows.append({
+                'focus_group': row['focus_group'],
+                'title_label': row['title_label'],
+                'taxon_id': row['taxon_id'],
+                'taxon_name': row['taxon_name'],
+                'common_name': row['common_name'],
+                'taxon_rank': row.get('taxon_rank'),
+                'display_label': row.get('display_label'),
+                'month': int(mk),
+                'count': int(mc),
+            })
+
+    monthly_taxa_df = pd.DataFrame(monthly_rows)
+
+    # 4. Within-taxon normalization per species
+    if not monthly_taxa_df.empty:
+        monthly_taxa_df['interval'] = 'month_of_year'
+        monthly_taxa_df['life_stage_bucket'] = 'overall'
+        # Normalize per species: group by taxon_id
+        species_totals = monthly_taxa_df.groupby('taxon_id')['count'].transform('sum')
+        monthly_taxa_df['fraction'] = monthly_taxa_df['count'] / species_totals.replace(0, float('nan'))
+        monthly_taxa_df = monthly_taxa_df.drop(columns=['interval', 'life_stage_bucket'])
+
+    # Write cache
+    if cache_path is not None:
+        _Path(cache_path).mkdir(parents=True, exist_ok=True)
+        top_taxa_df.to_parquet(top_cache, index=False)
+        monthly_taxa_df.to_parquet(monthly_cache, index=False)
+
+    return top_taxa_df, monthly_taxa_df
+
+
 def _taxa_for_kind(kind: str) -> dict:
     """Return iNaturalist API query parameters that scope results to a taxon group.
 
@@ -393,6 +1050,10 @@ def _get_filtered_photo_url(
             query_params[key] = taxa_filters[key]
 
     client = _inat_client(session, api_version=api_version)
+
+    # v2 returns only UUID by default; request photo fields explicitly.
+    if api_version == 'v2':
+        query_params['fields'] = json.dumps({'photos': {'url': True}})
 
     def _query_one(params: dict) -> Optional[str]:
         try:
@@ -792,6 +1453,10 @@ def get_mine(uname: str,
         observations = []
         per_page = 200
         page = 1
+        # v2 returns only UUID by default; request fields for display.
+        extra_params: dict[str, Any] = {}
+        if api_version == 'v2':
+            extra_params['fields'] = json.dumps(OBSERVATION_FIELDS_MINIMAL)
         while True:
             payload = client.observations(
                 params={
@@ -800,6 +1465,7 @@ def get_mine(uname: str,
                     'd2': str(end_date),
                     'page': page,
                     'per_page': per_page,
+                    **extra_params,
                 },
                 timeout=30,
             )

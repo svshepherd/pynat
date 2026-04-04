@@ -41,7 +41,7 @@ except Exception:  # pragma: no cover
         return x
 
 BASE = "https://api.inaturalist.org/v1"
-DEFAULT_INAT_API_VERSION = (os.environ.get("INAT_API_VERSION", "v1") or "v1").strip("/")
+DEFAULT_INAT_API_VERSION = (os.environ.get("INAT_API_VERSION", "v2") or "v2").strip("/")
 PER_PAGE = 200
 SLEEP = 0.2  # seconds between paginated calls
 DEFAULT_CACHE_DIR = os.path.join(os.path.dirname(__file__), "data")
