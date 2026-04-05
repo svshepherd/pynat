@@ -15,6 +15,7 @@ Logging: the module uses a package-level ``logger``. Do not call
 ``logging.basicConfig`` in libraries; configure logging in your application.
 """
 
+import hashlib
 import json
 import requests
 import pandas as pd
@@ -532,16 +533,42 @@ SEASONAL_TAXON_REGISTRY: list[dict[str, Any]] = [
         'life_stages': [],
         'children': [],
     },
-    # -- Plants in Flower (standalone) --
+    # -- Plants (group with phenotype subgroups) --
+    {
+        'key': 'plants',
+        'group': None,
+        'focus_group': 'Plantae',
+        'title_label': 'Plants',
+        'taxon_id': 47126,
+        'extra': {},
+        'without_taxon_id': None,
+        'color': '#2b8a3e',
+        'analysis_mode': 'phenology',
+        'life_stages': [],
+        'children': ['plants_in_flower', 'plants_in_fruit'],
+    },
     {
         'key': 'plants_in_flower',
-        'group': None,
-        'focus_group': 'Plants in Flower',
+        'group': 'plants',
+        'focus_group': 'Flowering Plants',
         'title_label': 'Flowering Plants',
         'taxon_id': 47126,
         'extra': {'term_id': 12, 'term_value_id': 13},
         'without_taxon_id': None,
         'color': '#9467bd',
+        'analysis_mode': 'phenology',
+        'life_stages': [],
+        'children': [],
+    },
+    {
+        'key': 'plants_in_fruit',
+        'group': 'plants',
+        'focus_group': 'Fruiting Plants',
+        'title_label': 'Fruiting Plants',
+        'taxon_id': 47126,
+        'extra': {'term_id': 12, 'term_value_id': 14},
+        'without_taxon_id': None,
+        'color': '#8c564b',
         'analysis_mode': 'phenology',
         'life_stages': [],
         'children': [],
@@ -729,6 +756,7 @@ def fetch_top_seasonal_taxa(
     from pathlib import Path as _Path
 
     place_id_str = ','.join(str(x) for x in place_ids)
+    wt = entry.get('without_taxon_id')
     rank_value = tier3_rank if tier3_rank is not None else entry.get('tier3_rank', 'species')
     if isinstance(rank_value, str):
         rank_token = rank_value or 'any'
@@ -736,7 +764,21 @@ def fetch_top_seasonal_taxa(
         rank_token = '-'.join(str(x) for x in rank_value if x) or 'any'
     else:
         rank_token = 'any'
-    cache_sig = f"{entry['key']}_top{top_n}_rank{rank_token}_schema4"
+    cache_basis = {
+        'api_version': api_version,
+        'entry_extra': entry.get('extra', {}),
+        'entry_key': entry['key'],
+        'min_obs_per_year': int(min_obs_per_year),
+        'native': bool(native),
+        'place_ids': sorted(int(x) for x in place_ids),
+        'rank': rank_token,
+        'top_n': int(top_n),
+        'without_taxon_id': wt,
+    }
+    cache_hash = hashlib.sha1(
+        json.dumps(cache_basis, sort_keys=True, default=str).encode('utf-8')
+    ).hexdigest()[:12]
+    cache_sig = f"{entry['key']}_top{top_n}_rank{rank_token}_schema5_{cache_hash}"
 
     # Check cache
     if cache_path is not None:
@@ -769,7 +811,6 @@ def fetch_top_seasonal_taxa(
 
     if native:
         spp_params['native'] = 'true'
-    wt = entry.get('without_taxon_id')
     if wt:
         spp_params['without_taxon_id'] = ','.join(str(x) for x in wt) if isinstance(wt, list) else str(wt)
 

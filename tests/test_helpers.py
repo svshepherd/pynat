@@ -1231,7 +1231,7 @@ def test_get_seasonal_group_overview_entries():
     assert 'insects' in keys
     assert 'birds' in keys
     assert 'mammalia' in keys
-    assert 'plants_in_flower' in keys
+    assert 'plants' in keys
     assert len(entries) == 4
     for e in entries:
         assert e['group'] is None
@@ -1264,6 +1264,21 @@ def test_get_seasonal_subgroup_entries_birds():
     non_pass = h.get_seasonal_taxon_by_key('non_passerines')
     assert non_pass['taxon_id'] == 3
     assert non_pass['without_taxon_id'] == [7251]
+
+
+def test_get_seasonal_subgroup_entries_plants():
+    import helpers as h
+
+    entries = h.get_seasonal_subgroup_entries('plants')
+    keys = [e['key'] for e in entries]
+    assert len(entries) == 2
+    assert 'plants_in_flower' in keys
+    assert 'plants_in_fruit' in keys
+
+    flowering = h.get_seasonal_taxon_by_key('plants_in_flower')
+    fruiting = h.get_seasonal_taxon_by_key('plants_in_fruit')
+    assert flowering['extra'] == {'term_id': 12, 'term_value_id': 13}
+    assert fruiting['extra'] == {'term_id': 12, 'term_value_id': 14}
 
 
 def test_get_seasonal_subgroup_entries_standalone():
@@ -1567,3 +1582,67 @@ def test_fetch_top_seasonal_taxa_backfills_missing_taxon_metadata():
     assert row['taxon_rank'] == 'species'
     assert row['display_label'] == 'Ground beetle'
     assert not monthly_df.empty
+
+
+def test_fetch_top_seasonal_taxa_cache_respects_place_scope(tmp_path):
+    import helpers as h
+
+    class FakeResp:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def __init__(self):
+            self.species_calls = []
+
+        def get(self, url, params=None, timeout=30):
+            if 'species_counts' in url:
+                query = dict(params or {})
+                self.species_calls.append(query)
+                place_id = str(query.get('place_id'))
+                if place_id == '1297':
+                    return FakeResp({'results': [
+                        {'taxon': {'id': 100, 'name': 'Species A', 'preferred_common_name': 'Sp A', 'rank': 'species'}, 'count': 400},
+                    ]})
+                return FakeResp({'results': [
+                    {'taxon': {'id': 200, 'name': 'Species B', 'preferred_common_name': 'Sp B', 'rank': 'species'}, 'count': 350},
+                ]})
+            if params and params.get('interval') == 'year':
+                return FakeResp({'results': {'year': {'2024-01-01': 100}}})
+            if params and params.get('interval') == 'month_of_year':
+                taxon_id = int(params.get('taxon_id'))
+                return FakeResp({'results': {'month_of_year': {'4': taxon_id}}})
+            return FakeResp({'results': {}})
+
+    entry = h.get_seasonal_taxon_by_key('mammalia')
+    session = FakeSession()
+
+    first_top_df, _ = h.fetch_top_seasonal_taxa(
+        entry,
+        [1297],
+        session=session,
+        cache_path=tmp_path,
+        cache_tag='test_cache_scope',
+        api_version='v2',
+    )
+    second_top_df, _ = h.fetch_top_seasonal_taxa(
+        entry,
+        [1],
+        session=session,
+        cache_path=tmp_path,
+        cache_tag='test_cache_scope',
+        api_version='v2',
+    )
+
+    assert len(session.species_calls) == 2
+    assert first_top_df['taxon_id'].tolist() == [100]
+    assert second_top_df['taxon_id'].tolist() == [200]
