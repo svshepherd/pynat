@@ -59,7 +59,7 @@ if place_mode == "Place ID":
     place_id = st.sidebar.number_input(
         "Place ID", min_value=1, value=160915, step=1, key="place_id_input"
     )
-    place_name = _lookup_place_name(session, int(place_id))
+    place_name = _cached_lookup_place_name(session, int(place_id))
     if place_name:
         st.sidebar.caption(f"📍 {place_name}")
     location_key = ("place", int(place_id))
@@ -88,7 +88,7 @@ show_images = st.sidebar.checkbox("Show images", value=True)
 # ---------------------------------------------------------------------------
 
 
-@st.cache_data(ttl=3600, show_spinner="Querying iNaturalist...")
+@st.cache_data(ttl=3600)
 def _run_query(_session, kind, location_key, norm, limit, lineage_filter):
     """Cached wrapper around coming_soon().
 
@@ -109,10 +109,21 @@ def _run_query(_session, kind, location_key, norm, limit, lineage_filter):
     )
 
 
+@st.cache_data(ttl=3600)
+def _cached_lookup_place_name(_session, place_id: int):
+    """Cached wrapper so place-name lookups don't fire on every widget change."""
+    return _lookup_place_name(_session, place_id)
+
+
 if st.sidebar.button("Run Query", type="primary", use_container_width=True):
     st.session_state["run"] = True
+    st.session_state["query_pending"] = True
+
+status_slot = st.sidebar.empty()
 
 if st.session_state.get("run"):
+    if st.session_state.get("query_pending"):
+        status_slot.caption("Results... coming soon ⏳")
     try:
         res = _run_query(
             session,
@@ -137,12 +148,19 @@ if st.session_state.get("run"):
         else:
             st.error(f"Query failed: {exc}")
             st.info("Verify your Place ID or coordinates and try a different group.")
+        st.session_state["query_pending"] = False
+        status_slot.warning("Query failed ⚠️")
         st.stop()
 
     if res is None or res.empty:
         st.warning("No results found. Try a larger radius or different group.")
+        st.session_state["query_pending"] = False
+        status_slot.warning("No results found ⚠️")
         st.stop()
 
+    st.session_state["query_pending"] = False
+    status_slot.success("Results ready ✅")
+    st.success("Results ready ✅")
     st.subheader(f"Found {len(res)} taxa")
 
     if show_images:
@@ -186,7 +204,7 @@ if st.session_state.get("run"):
                     if nativity:
                         nat_pid = row.get("nativity_place_id")
                         nat_place = (
-                            _lookup_place_name(session, int(nat_pid))
+                            _cached_lookup_place_name(session, int(nat_pid))
                             if nat_pid is not None and not pd.isna(nat_pid)
                             else None
                         )
@@ -207,4 +225,7 @@ if st.session_state.get("run"):
         safe_cols = [c for c in show_cols if c in res.columns]
         st.dataframe(res[safe_cols], use_container_width=True, hide_index=True)
 else:
-    st.info("Configure settings in the sidebar and click **Run Query**.")
+    st.info(
+        "Configure settings in the sidebar and click **Run Query**.\n\n"
+        "📱 On a small screen (phone), open the sidebar using the **>>** icon at the upper left."
+    )
