@@ -5,6 +5,12 @@ Run with:  streamlit run coming_soon_streamlit_app.py
 import streamlit as st
 import pandas as pd
 
+try:
+    from streamlit_geolocation import streamlit_geolocation as _streamlit_geolocation
+    _HAS_GEOLOCATION = True
+except ImportError:
+    _HAS_GEOLOCATION = False
+
 from helpers import (
     coming_soon,
     get_inat_session,
@@ -64,9 +70,39 @@ if place_mode == "Place ID":
         st.sidebar.caption(f"📍 {place_name}")
     location_key = ("place", int(place_id))
 else:
-    lat = st.sidebar.number_input("Latitude", value=37.66933, format="%.5f")
-    lon = st.sidebar.number_input("Longitude", value=-77.81001, format="%.5f")
+    # ---- (a) Geolocation button ------------------------------------------------
+    if _HAS_GEOLOCATION:
+        st.sidebar.caption(
+            "⚠️ Requires browser permission and HTTPS. May not work in all environments."
+        )
+        try:
+            geo = _streamlit_geolocation()
+            if geo and geo.get("latitude") is not None:
+                st.session_state["coord_lat"] = geo["latitude"]
+                st.session_state["coord_lon"] = geo["longitude"]
+                accuracy = geo.get("accuracy")
+                acc_note = f" (±{accuracy:.0f} m)" if accuracy is not None else ""
+                st.sidebar.success(f"Location updated ✅{acc_note}")
+            elif geo is not None:
+                # Component rendered but returned no usable coords (denied / unsupported)
+                st.sidebar.warning(
+                    "Could not get location — your entered coordinates are unchanged."
+                )
+        except Exception:
+            st.sidebar.warning(
+                "Location lookup failed — your entered coordinates are unchanged."
+            )
+
+    # ---- (b) Radius ------------------------------------------------------------
     radius_km = st.sidebar.number_input("Radius (km)", min_value=1.0, value=5.0, step=1.0)
+
+    # ---- (c) Lat/lon (editable, pre-populated by geolocation if available) -----
+    lat = st.sidebar.number_input(
+        "Latitude", value=37.66933, format="%.5f", key="coord_lat"
+    )
+    lon = st.sidebar.number_input(
+        "Longitude", value=-77.81001, format="%.5f", key="coord_lon"
+    )
     location_key = ("coords", lat, lon, radius_km)
 
 st.sidebar.markdown("---")
