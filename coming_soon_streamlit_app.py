@@ -33,6 +33,37 @@ if "session" not in st.session_state:
 session = st.session_state["session"]
 
 # ---------------------------------------------------------------------------
+# Cached helpers (must be defined before first call in sidebar)
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def _run_query(_session, kind, location_key, norm, limit, lineage_filter):
+    """Cached wrapper around coming_soon().
+
+    ``location_key`` is a hashable tuple: ("place", id) or ("coords", lat, lon, km).
+    """
+    mode, *vals = location_key
+    loc_kwargs = {"places": [vals[0]]} if mode == "place" else {"loc": tuple(vals)}
+    return coming_soon(
+        kind=kind,
+        **loc_kwargs,
+        norm=None if norm == "none" else norm,
+        limit=limit,
+        fetch_images=False,
+        use_cache=True,
+        lineage_filter=lineage_filter,
+        nativity_place_id='auto',
+        session=_session,
+    )
+
+
+@st.cache_data(ttl=3600)
+def _cached_lookup_place_name(_session, place_id: int):
+    """Cached wrapper so place-name lookups don't fire on every widget change."""
+    return _lookup_place_name(_session, place_id)
+
+
+# ---------------------------------------------------------------------------
 # Sidebar controls
 # ---------------------------------------------------------------------------
 
@@ -122,33 +153,6 @@ show_images = st.sidebar.checkbox("Show images", value=True)
 # ---------------------------------------------------------------------------
 # Run query
 # ---------------------------------------------------------------------------
-
-
-@st.cache_data(ttl=3600)
-def _run_query(_session, kind, location_key, norm, limit, lineage_filter):
-    """Cached wrapper around coming_soon().
-
-    ``location_key`` is a hashable tuple: ("place", id) or ("coords", lat, lon, km).
-    """
-    mode, *vals = location_key
-    loc_kwargs = {"places": [vals[0]]} if mode == "place" else {"loc": tuple(vals)}
-    return coming_soon(
-        kind=kind,
-        **loc_kwargs,
-        norm=None if norm == "none" else norm,
-        limit=limit,
-        fetch_images=False,
-        use_cache=True,
-        lineage_filter=lineage_filter,
-        nativity_place_id='auto',
-        session=_session,
-    )
-
-
-@st.cache_data(ttl=3600)
-def _cached_lookup_place_name(_session, place_id: int):
-    """Cached wrapper so place-name lookups don't fire on every widget change."""
-    return _lookup_place_name(_session, place_id)
 
 
 if st.sidebar.button("Run Query", type="primary", use_container_width=True):

@@ -1691,6 +1691,7 @@ dev = [
 ]
 streamlit = [
     { name = "streamlit" },
+    { name = "streamlit-geolocation" },
 ]
 
 [package.metadata]
@@ -1710,6 +1711,7 @@ requires-dist = [
     { name = "requests-ratelimiter", specifier = "<0.9" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11" },
     { name = "streamlit", marker = "extra == 'streamlit'", specifier = ">=1.30" },
+    { name = "streamlit-geolocation", marker = "extra == 'streamlit'", specifier = ">=0.0.2" },
     { name = "tqdm", specifier = ">=4.66" },
 ]
 provides-extras = ["dev", "streamlit"]
@@ -2150,6 +2152,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/92/8e/f2b8b4fa8ba65aae251170c54f8ce198fb588fc348301c2b624f8c63efac/streamlit-1.55.0.tar.gz", hash = "sha256:015e512bbd02d000f4047e51118dc086b70e7d9c46b4a11a33c2509731379626", size = 8612008, upload-time = "2026-03-03T22:26:02.149Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dc/e6/412c1e1f200ca8c32ecf10201839183e261ad61ced3ede34a66f6d4be3cf/streamlit-1.55.0-py3-none-any.whl", hash = "sha256:1e4a16449c6131696180f4ddb40ea8c51834e89c2a43e1b0362bc9b1cfd9b415", size = 9075714, upload-time = "2026-03-03T22:25:59.126Z" },
+]
+
+[[package]]
+name = "streamlit-geolocation"
+version = "0.0.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "streamlit" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/e2/f3d7da8d0e9892a5f20e53603b08a71cdb98a813193213b2cbcc3bb0e5f3/streamlit_geolocation-0.0.10.tar.gz", hash = "sha256:0617a39aa26a6019f9b6989e31a310742fe5fe1728321474cf8b5f03a7146d4c", size = 795952, upload-time = "2023-11-18T15:32:28.958Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2b/64/619d0332c50ecb65a5c03c63e78c06855325c8f605459168aa96a06ce042/streamlit_geolocation-0.0.10-py3-none-any.whl", hash = "sha256:e9d9eb61238db468076ef374027a1691fa6696f44d4e4472b0123df03dc0d9ea", size = 802665, upload-time = "2023-11-18T15:32:24.798Z" },
 ]
 
 [[package]]
