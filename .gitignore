@@ -11,6 +11,7 @@ __pycache__/
 
 # Notebook noise
 .ipynb_checkpoints/
+notebooks/exploratory/cache/
 
 # Local secrets and data
 *.pkd
